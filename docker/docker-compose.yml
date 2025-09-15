@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # Ollama AI 서비스
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ex-gpt-stt-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # STT 애플리케이션
+  ex-gpt-stt:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: ex-gpt-stt-app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./input:/app/input:ro
+      - ./output:/app/output
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      - DISPLAY=${DISPLAY}
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      ollama:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+volumes:
+  ollama_data:
+    driver: local
+
+networks:
+  default:
+    name: ex-gpt-stt-network
