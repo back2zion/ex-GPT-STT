@@ -77,7 +77,7 @@ python stt_simple.py audio_file.wav
 ## 🔧 고급 기능
 
 ### STT 후처리
-- **용어 사전 기반 보정**: `C:\Users\KwakDaniel\OneDrive\첨부 파일\interview_STT` 디렉터리의 모든 파일을 참조
+- **용어 사전 기반 보정**: 설정된 참조 디렉터리의 용어집 파일들을 활용한 자동 보정
 - **전문 용어 및 고유명사 자동 수정**
 - **맞춤법 및 표기법 표준화**
 
