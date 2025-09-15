@@ -93,7 +93,7 @@ This is **faster-whisper**, a high-performance reimplementation of OpenAI's Whis
 ### Key Process Flow:
 1. **STT (Speech-to-Text)**: Audio transcription using faster-whisper
 2. **Post-processing**: Text correction and refinement using reference dictionary
-3. **AI Analysis**: Content analysis using qwen2.5:32b model via Ollama
+3. **AI Analysis**: Content analysis using qwen3:8b model via Ollama
 4. **Meeting Minutes**: Generate structured minutes following PDF template format
 
 ### Post-processing Dictionary:
@@ -113,7 +113,7 @@ This is **faster-whisper**, a high-performance reimplementation of OpenAI's Whis
 - Use AI analysis to extract meaningful content structure and populate template fields
 
 ### AI Integration:
-- Model: qwen3:32b (via Ollama API at localhost:11434)
+- Model: qwen3:8b (via Ollama API at localhost:11434)
 - Purpose: Analyze transcribed content and generate structured meeting minutes
 - Fallback: Basic structure if AI analysis fails
 

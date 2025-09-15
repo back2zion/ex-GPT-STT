@@ -6,7 +6,7 @@
 
 - **고성능 STT (Speech-to-Text)**: Faster Whisper 기반 음성 인식
 - **한국어 후처리**: 전문 용어 및 고유명사 보정
-- **AI 회의록 생성**: Qwen3-32B 모델을 활용한 구조화된 회의록 자동 생성
+- **AI 회의록 생성**: Qwen3-8B 모델을 활용한 구조화된 회의록 자동 생성
 - **PDF 템플릿 호환**: 기존 회의록 템플릿 형식 유지
 - **드래그 앤 드롭 지원**: 간편한 오디오 파일 처리
 
@@ -20,7 +20,7 @@
 ### 처리 흐름
 1. **음성 인식**: Faster Whisper를 사용한 고정밀도 STT
 2. **텍스트 후처리**: 한국어 전문용어 및 고유명사 보정
-3. **AI 분석**: Qwen3-32B 모델을 통한 내용 구조화
+3. **AI 분석**: Qwen3-8B 모델을 통한 내용 구조화
 4. **회의록 생성**: PDF 템플릿 형식의 회의록 자동 생성
 
 
@@ -30,7 +30,7 @@
 
 * **Python 3.10 이상**
 * **uv**: 고속 Python 패키지 매니저
-* **Ollama**: Qwen3-32B 모델 실행을 위한 로컬 AI 서버
+* **Ollama**: Qwen3-8B 모델 실행을 위한 로컬 AI 서버
 * **드래그 앤 드롭 라이브러리**: GUI 지원
 
 ### 설치 방법
@@ -57,8 +57,8 @@ uv sync
 # Ollama 설치 (https://ollama.ai/)
 curl -fsSL https://ollama.ai/install.sh | sh
 
-# Qwen3-32B 모델 다운로드
-ollama pull qwen3:32b
+# Qwen3-8B 모델 다운로드 (빠른 성능)
+ollama pull qwen3:8b
 ```
 
 ### 사용법
@@ -101,6 +101,7 @@ huggingface-cli login --token your_token_here
 - 실제 음성 특징 분석으로 정확한 화자 구분
 - 자동 화자 수 감지 또는 수동 지정 가능
 - GPU 가속 지원으로 빠른 처리
+- NumPy 1.x 호환성 (NumPy 2.0+ 대응)
 
 #### ⏰ 시간 기반 간단 화자 구분 (기본)
 - 5초 이상 공백시 화자 변경으로 간주
@@ -139,7 +140,7 @@ import requests
 # Ollama API 호출
 def generate_meeting_minutes(transcription_text):
     response = requests.post("http://localhost:11434/api/generate", json={
-        "model": "qwen3:32b",
+        "model": "qwen3:8b",
         "prompt": f"다음 회의 내용을 구조화된 회의록으로 작성해주세요:\n\n{transcription_text}",
         "stream": False
     })
@@ -190,7 +191,7 @@ uv run flake8 .
 
 - **[SYSTRAN/faster-whisper](https://github.com/SYSTRAN/faster-whisper)**: 고성능 Whisper 구현
 - **[Ollama](https://ollama.ai/)**: 로컬 AI 모델 실행 환경
-- **Qwen3-32B**: 회의록 생성을 위한 AI 모델
+- **Qwen3-8B**: 회의록 생성을 위한 AI 모델
 
 ## 🤝 기여하기
 

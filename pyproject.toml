@@ -20,6 +20,7 @@ dev = [
 ]
 gpu = [
     "nvidia-cudnn-cu12>=9.0.0",
+    "pynvml>=11.0.0",
 ]
 benchmark = [
     "transformers>=4.25.0",
@@ -32,4 +33,5 @@ diarization = [
     "pyannote.audio>=3.1.0",
     "torch>=2.0.0",
     "torchaudio>=2.0.0",
+    "numpy>=1.24.0,<2.0.0",
 ]

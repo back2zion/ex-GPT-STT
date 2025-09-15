@@ -525,24 +525,44 @@ def complete_transcription_and_minutes():
         print("🔄 Large-v3 모델로 고품질 전사 시작...")
         show_resource_usage(process, "모델 로드 전")
         
-        # Large 모델로 최고 품질 (cuDNN 이슈로 임시 CPU 사용)
+        # Large 모델로 최고 품질 GPU 가속
         gpu_success = False
-        use_gpu = False  # 임시로 GPU 비활성화
+        
+        # GPU 자동 감지 및 활성화
+        try:
+            import torch
+            use_gpu = torch.cuda.is_available()
+            if use_gpu:
+                gpu_count = torch.cuda.device_count()
+                gpu_name = torch.cuda.get_device_name(0)
+                print(f"🎯 CUDA GPU 감지됨: {gpu_count}개 ({gpu_name})")
+            else:
+                print("⚠️ CUDA GPU를 사용할 수 없습니다.")
+        except ImportError:
+            use_gpu = False
+            print("⚠️ PyTorch가 없습니다. CPU 모드로 실행합니다.")
+            
+        print(f"🔧 GPU 사용 설정: {'활성화' if use_gpu else '비활성화'}")
         
         if use_gpu:
             try:
-                print("🚀 GPU 가속 사용 (RTX 3090)")
+                print(f"🚀 GPU 가속 사용 ({gpu_name})")
+                print("📥 Large-v3 모델을 GPU로 로딩 중...")
                 model = WhisperModel("large-v3", device="cuda", compute_type="float16")
                 gpu_success = True
-                print("✅ GPU 모델 로드 성공")
+                print("✅ GPU 모델 로드 성공!")
+                
+                # GPU 메모리 사용량 확인
+                if torch.cuda.is_available():
+                    gpu_memory_used = torch.cuda.memory_allocated(0) / (1024**3)
+                    gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                    print(f"🎯 GPU 메모리 사용: {gpu_memory_used:.1f}GB / {gpu_memory_total:.1f}GB")
             except Exception as e:
                 print(f"⚠️ GPU 실패 - CPU Large 모델로 전환: {str(e)[:50]}...")
-                # GPU 실패시에도 Large 모델 사용 (CPU 제한)
-                cpu_count = psutil.cpu_count(logical=False)
-                max_workers = max(1, min(4, cpu_count // 2))
-                print(f"🔧 CPU Large-v3 모델 로드 (워커: {max_workers}개)")
-                model = WhisperModel("large-v3", device="cpu", compute_type="int8", num_workers=max_workers)
-        else:
+                gpu_success = False
+        
+        # GPU를 사용할 수 없거나 실패한 경우 CPU 모드로 fallback
+        if not use_gpu or not gpu_success:
             print("🖥️ CPU 모드 사용 (Large-v3 모델)")
             
             # Large 모델 사용하되 시스템 보호 설정 적용
@@ -558,7 +578,10 @@ def complete_transcription_and_minutes():
             )
         show_resource_usage(process, "모델 로드 완료")
         
-        print("🎤 전사 시작... (Large-v3 모델, 시스템 보호 설정)")
+        if gpu_success:
+            print("🎤 GPU 가속 전사 시작... (Large-v3 모델)")
+        else:
+            print("🎤 CPU 전사 시작... (Large-v3 모델, 시스템 보호 설정)")
         
         # 실시간 진행 상태 표시
         print("📊 전사 진행 중... (세그먼트별로 실시간 표시됩니다)")
@@ -587,9 +610,20 @@ def complete_transcription_and_minutes():
         for i, segment in enumerate(segments):
             segments_list.append(segment)
             
-            # 실시간 진행 표시
+            # 실시간 진행 표시 (GPU 사용률 포함)
             elapsed = (datetime.now() - start_time).total_seconds()
-            print(f"✅ [{i+1:3d}] [{segment.start:6.1f}s → {segment.end:6.1f}s] {segment.text.strip()[:50]}{'...' if len(segment.text.strip()) > 50 else ''}")
+            
+            # GPU 메모리 사용량 표시 (10개마다)
+            gpu_info = ""
+            if gpu_success and i % 10 == 0 and torch.cuda.is_available():
+                try:
+                    gpu_memory_used = torch.cuda.memory_allocated(0) / (1024**3)
+                    gpu_info = f" [GPU: {gpu_memory_used:.1f}GB]"
+                except Exception:
+                    # GPU 정보 가져오기 실패시 무시
+                    pass
+            
+            print(f"✅ [{i+1:3d}] [{segment.start:6.1f}s → {segment.end:6.1f}s] {segment.text.strip()[:50]}{'...' if len(segment.text.strip()) > 50 else ''}{gpu_info}")
             
             # 5개 세그먼트마다 진행 상황 요약
             if (i + 1) % 5 == 0:
@@ -876,38 +910,49 @@ def analyze_meeting_with_ai(meeting_text):
 한국어로 작성하고, 구체적이고 명확하게 작성해주세요."""
 
         payload = {
-            "model": "qwen3:32b",
+            "model": "qwen3:8b",
             "prompt": prompt,
             "stream": False
         }
         
-        print("🤖 qwen3-32b 모델로 분석 중... (최대 3분 소요)")
+        print("🤖 qwen3-8b 모델로 분석 중... (1-2분 소요)")
         print("⏳ AI가 회의 내용을 분석하고 있습니다...")
         
         import time
         start_time = time.time()
         
-        response = requests.post(url, json=payload, timeout=180)
+        response = requests.post(url, json=payload, timeout=120)
         
         elapsed = time.time() - start_time
+        
+        print(f"🔍 API 응답 상태: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
             analysis = result.get('response', '')
             print(f"✅ AI 분석 완료! (소요시간: {elapsed:.1f}초)")
+            print(f"📊 AI 응답 길이: {len(analysis)}자")
+            print(f"🔍 AI 응답 미리보기: {analysis[:200]}...")
             print("📋 회의록 구조화 중...")
             return parse_meeting_analysis(analysis)
         else:
             print(f"❌ AI analysis failed: {response.status_code}")
+            print(f"🔍 Response text: {response.text}")
             return create_fallback_analysis(meeting_text)
             
     except Exception as e:
         print(f"❌ AI analysis error: {str(e)}")
+        print(f"🔍 Error type: {type(e).__name__}")
+        import traceback
+        print(f"🔍 Traceback: {traceback.format_exc()}")
+        print("🔄 Fallback 분석으로 전환...")
         return create_fallback_analysis(meeting_text)
 
 def parse_meeting_analysis(ai_response):
     """AI 응답을 파싱해서 구조화된 데이터로 변환"""
     try:
+        print(f"🔍 파싱 시작, 응답 길이: {len(ai_response)}")
+        print(f"🔍 응답 내용 미리보기: {ai_response[:500]}...")
         lines = ai_response.strip().split('\n')
         analysis = {
             'subject': '',
