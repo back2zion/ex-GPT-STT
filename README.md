@@ -82,6 +82,31 @@ uv run python stt_simple.py audio_file.wav
 
 ## 🔧 고급 기능
 
+### 화자 분리 (Speaker Diarization)
+Ex-GPT STT는 두 가지 화자 분리 방식을 지원합니다:
+
+#### 🎯 실제 음성 특성 기반 화자 분리 (권장)
+```bash
+# pyannote.audio 설치
+uv sync --extra diarization
+
+# Hugging Face 토큰 설정 (https://huggingface.co/settings/tokens 에서 생성)
+export HF_TOKEN="your_token_here"
+
+# 또는 huggingface-cli 사용
+huggingface-cli login --token your_token_here
+```
+
+**특징:**
+- 실제 음성 특징 분석으로 정확한 화자 구분
+- 자동 화자 수 감지 또는 수동 지정 가능
+- GPU 가속 지원으로 빠른 처리
+
+#### ⏰ 시간 기반 간단 화자 구분 (기본)
+- 5초 이상 공백시 화자 변경으로 간주
+- 추가 설치 없이 즉시 사용 가능
+- 최대 4명까지 순환 배치
+
 ### STT 후처리
 - **용어 사전 기반 보정**: 설정된 참조 디렉터리의 용어집 파일들을 활용한 자동 보정
 - **전문 용어 및 고유명사 자동 수정**
@@ -123,9 +148,19 @@ def generate_meeting_minutes(transcription_text):
 
 ## 🛠 개발 및 테스트
 
-### 개발 의존성 추가
+### 선택적 기능별 패키지 설치
 ```bash
-uv add --dev pytest black isort flake8
+# 개발 도구 (pytest, black, isort, flake8)
+uv sync --extra dev
+
+# GPU 가속 (CUDA 지원)
+uv sync --extra gpu
+
+# 실제 화자 분리 기능 (pyannote.audio)
+uv sync --extra diarization
+
+# 벤치마크 도구
+uv sync --extra benchmark
 ```
 
 ### 테스트 실행

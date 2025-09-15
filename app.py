@@ -622,24 +622,40 @@ def complete_transcription_and_minutes():
         f.write(f"{int(info.duration//60)}분 {int(info.duration%60)}초\n")
         f.write(f"언어: {info.language} (확률: {info.language_probability:.1%})\n\n")
         
-        current_speaker = "화자1"
-        speaker_count = 1
+        # 화자 분리 수행
+        print("🎭 화자 분리 시작...")
+        try:
+            from speaker_diarization import perform_speaker_diarization, apply_speaker_diarization_to_transcription, simple_time_based_diarization
+            
+            # 실제 화자 분리 시도
+            speaker_segments = perform_speaker_diarization(audio_file, num_speakers=None)
+            
+            if speaker_segments:
+                # 실제 화자 분리 성공
+                segments_list = apply_speaker_diarization_to_transcription(segments_list, speaker_segments)
+                print("✅ 실제 음성 특성 기반 화자 분리 적용 완료")
+            else:
+                # 실패시 시간 기반 화자 구분
+                segments_list = simple_time_based_diarization(segments_list, gap_threshold=5.0, max_speakers=4)
+                print("✅ 시간 기반 화자 구분 적용 완료")
         
+        except ImportError:
+            # pyannote.audio 없으면 시간 기반 사용
+            from speaker_diarization import simple_time_based_diarization
+            segments_list = simple_time_based_diarization(segments_list, gap_threshold=5.0, max_speakers=4)
+            print("✅ 시간 기반 화자 구분 적용 완료 (pyannote.audio 미설치)")
+        
+        # 화자 정보를 포함한 STT 파일 저장
         for i, segment in enumerate(segments_list):
-            # 간단한 화자 구분 (5초 이상 간격이면 다른 화자)
-            if i > 0:
-                prev_segment = segments_list[i-1]
-                if segment.start - prev_segment.end > 5.0:
-                    speaker_count += 1
-                    if speaker_count > 4:
-                        speaker_count = 1
-                    current_speaker = f"화자{speaker_count}"
             
             start_min = int(segment.start // 60)
             start_sec = int(segment.start % 60)
             time_str = f"{start_min:02d}:{start_sec:02d}"
             
-            f.write(f"{current_speaker} {time_str}\n")
+            # 화자 정보 사용 (있으면 segment.speaker, 없으면 기본값)
+            speaker = getattr(segment, 'speaker', f"화자{((i//10)%4)+1}")
+            
+            f.write(f"{speaker} {time_str}\n")
             f.write(f"{segment.text.strip()}\n\n")
             
             if i % 50 == 0 and i > 0:
