@@ -29,10 +29,11 @@ def setup_cudnn_env():
             print(f"✅ cuDNN 환경 설정 완료: {lib_path}")
             return True
     except ImportError:
-        print("⚠️ nvidia-cudnn-cu12 패키지가 없습니다")
+        print("⚠️ nvidia-cudnn-cu12 패키지가 없습니다 (CPU 모드로 실행)")
+        return False
     except Exception as e:
-        print(f"⚠️ cuDNN 환경 설정 실패: {e}")
-    return False
+        print(f"⚠️ cuDNN 환경 설정 실패: {e} (CPU 모드로 실행)")
+        return False
 
 # 시작 시 cuDNN 환경 설정
 setup_cudnn_env()
@@ -521,7 +522,7 @@ def complete_transcription_and_minutes():
         
         print(f"✅ {len(segments)}개 문장 로드 완료")
     else:
-        print("🔄 Large 모델로 고품질 전사 시작...")
+        print("🔄 Large-v3 모델로 고품질 전사 시작...")
         show_resource_usage(process, "모델 로드 전")
         
         # Large 모델로 최고 품질 (cuDNN 이슈로 임시 CPU 사용)
@@ -535,17 +536,40 @@ def complete_transcription_and_minutes():
                 gpu_success = True
                 print("✅ GPU 모델 로드 성공")
             except Exception as e:
-                print(f"⚠️ GPU 실패 - CPU로 전환: {str(e)[:50]}...")
-                model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+                print(f"⚠️ GPU 실패 - CPU Large 모델로 전환: {str(e)[:50]}...")
+                # GPU 실패시에도 Large 모델 사용 (CPU 제한)
+                cpu_count = psutil.cpu_count(logical=False)
+                max_workers = max(1, min(4, cpu_count // 2))
+                print(f"🔧 CPU Large-v3 모델 로드 (워커: {max_workers}개)")
+                model = WhisperModel("large-v3", device="cpu", compute_type="int8", num_workers=max_workers)
         else:
-            print("🖥️ CPU 모드 사용 (안정성 우선)")
-            model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+            print("🖥️ CPU 모드 사용 (Large-v3 모델)")
+            
+            # Large 모델 사용하되 시스템 보호 설정 적용
+            cpu_count = psutil.cpu_count(logical=False)  # 물리 코어 수
+            max_workers = max(1, min(4, cpu_count // 2))  # 물리 코어의 절반만 사용
+            
+            print(f"🔧 Large-v3 모델 로드 중... (워커: {max_workers}개, CPU 제한)")
+            model = WhisperModel(
+                "large-v3", 
+                device="cpu", 
+                compute_type="int8",
+                num_workers=max_workers
+            )
         show_resource_usage(process, "모델 로드 완료")
         
-        print("🎤 전사 시작...")
+        print("🎤 전사 시작... (Large-v3 모델, 시스템 보호 설정)")
+        
+        # 실시간 진행 상태 표시
+        print("📊 전사 진행 중... (세그먼트별로 실시간 표시됩니다)")
+        print("=" * 60)
+        
+        segment_count = 0
+        start_time = datetime.now()
+        
         segments, info = model.transcribe(
             audio_file,
-            beam_size=5,                    # 더 높은 정확도
+            beam_size=3,                    # 정확도와 속도 균형 (5→3)
             language="ko",                  # 한국어 설정
             vad_filter=True,               # 음성 활동 감지
             vad_parameters=dict(min_silence_duration_ms=500),  # VAD 세부 설정
@@ -556,7 +580,26 @@ def complete_transcription_and_minutes():
             initial_prompt="한국어 회의 내용입니다. 정확한 전사가 필요합니다."
         )
         
-        print("📝 전사 결과 저장 중...")
+        # 실시간 세그먼트 처리 및 진행 표시
+        print("📝 전사 결과 처리 중...")
+        segments_list = []
+        
+        for i, segment in enumerate(segments):
+            segments_list.append(segment)
+            
+            # 실시간 진행 표시
+            elapsed = (datetime.now() - start_time).total_seconds()
+            print(f"✅ [{i+1:3d}] [{segment.start:6.1f}s → {segment.end:6.1f}s] {segment.text.strip()[:50]}{'...' if len(segment.text.strip()) > 50 else ''}")
+            
+            # 5개 세그먼트마다 진행 상황 요약
+            if (i + 1) % 5 == 0:
+                print(f"📊 진행 상황: {i+1}개 세그먼트 완료 | 경과시간: {elapsed:.1f}초")
+                print("-" * 60)
+        
+        total_elapsed = (datetime.now() - start_time).total_seconds()
+        print("=" * 60)
+        print(f"🎉 전사 완료! 총 {len(segments_list)}개 세그먼트 | 소요시간: {total_elapsed:.1f}초")
+        
         show_resource_usage(process, "전사 완료")
         
         # GPU 메모리 정리 (안전하게)
@@ -567,8 +610,6 @@ def complete_transcription_and_minutes():
                 print("🧹 GPU 메모리 정리 완료")
             except:
                 pass
-    
-    segments_list = list(segments)
     
     print("🔧 STT 후처리 중...")
     # STT 후처리 - 용어 교정 및 개선
@@ -782,9 +823,13 @@ def analyze_meeting_with_ai(meeting_text):
     import requests
     import json
     
+    print("🔍 AI 분석 시작...")
+    print(f"📝 분석할 텍스트 길이: {len(meeting_text):,}자")
+    
     try:
         # qwen3-32b API 호출
         url = "http://localhost:11434/api/generate"
+        print("🌐 Ollama API 연결 중...")
         
         prompt = f"""다음 회의 전사 내용을 분석해서 회의록을 작성해주세요.
 
@@ -820,14 +865,21 @@ def analyze_meeting_with_ai(meeting_text):
             "stream": False
         }
         
-        print("🤖 AI analyzing with qwen3-32b...")
+        print("🤖 qwen3-32b 모델로 분석 중... (최대 3분 소요)")
+        print("⏳ AI가 회의 내용을 분석하고 있습니다...")
+        
+        import time
+        start_time = time.time()
         
         response = requests.post(url, json=payload, timeout=180)
+        
+        elapsed = time.time() - start_time
         
         if response.status_code == 200:
             result = response.json()
             analysis = result.get('response', '')
-            print("✅ AI analysis complete")
+            print(f"✅ AI 분석 완료! (소요시간: {elapsed:.1f}초)")
+            print("📋 회의록 구조화 중...")
             return parse_meeting_analysis(analysis)
         else:
             print(f"❌ AI analysis failed: {response.status_code}")
