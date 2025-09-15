@@ -28,25 +28,31 @@
 
 ### 설치 요구사항
 
-* **Python 3.9 이상**
-* **Faster Whisper**: `pip install faster-whisper`
+* **Python 3.10 이상**
+* **uv**: 고속 Python 패키지 매니저
 * **Ollama**: Qwen3-32B 모델 실행을 위한 로컬 AI 서버
 * **드래그 앤 드롭 라이브러리**: GUI 지원
 
 ### 설치 방법
 
-1. **저장소 클론**
+1. **uv 설치**
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+2. **저장소 클론**
 ```bash
 git clone https://github.com/back2zion/ex-GPT-STT.git
 cd ex-GPT-STT
 ```
 
-2. **의존성 설치**
+3. **가상환경 설정 및 의존성 설치**
 ```bash
-pip install -e .[dev]
+uv sync
 ```
 
-3. **Ollama 설치 및 모델 다운로드**
+4. **Ollama 설치 및 모델 다운로드**
 ```bash
 # Ollama 설치 (https://ollama.ai/)
 curl -fsSL https://ollama.ai/install.sh | sh
@@ -59,19 +65,19 @@ ollama pull qwen3:32b
 
 #### 통합 애플리케이션 실행
 ```bash
-python app.py
+uv run python app.py
 ```
 - 드래그 앤 드롭으로 오디오 파일 추가
 - 자동 STT 처리 및 회의록 생성
 
 #### 명령줄 STT 처리
 ```bash
-python stt.py audio_file.mp3
+uv run python stt.py audio_file.mp3
 ```
 
 #### 간단한 STT 변환
 ```bash
-python stt_simple.py audio_file.wav
+uv run python stt_simple.py audio_file.wav
 ```
 
 ## 🔧 고급 기능
@@ -117,23 +123,28 @@ def generate_meeting_minutes(transcription_text):
 
 ## 🛠 개발 및 테스트
 
+### 개발 의존성 추가
+```bash
+uv add --dev pytest black isort flake8
+```
+
 ### 테스트 실행
 ```bash
 # 전체 테스트 실행
-pytest tests/
+uv run pytest tests/
 
 # 특정 테스트 파일 실행
-pytest tests/test_transcribe.py -v
+uv run pytest tests/test_transcribe.py -v
 ```
 
 ### 코드 품질 검사
 ```bash
 # 코드 포맷팅
-black .
-isort .
+uv run black .
+uv run isort .
 
 # 린터 실행
-flake8 .
+uv run flake8 .
 ```
 
 ## 📝 라이선스
