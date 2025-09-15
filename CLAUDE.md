@@ -2,11 +2,49 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Project Structure
+
+This project extends faster-whisper with Korean STT post-processing and meeting minutes generation. The main components are:
+
+### Core Files
+- **`app.py`**: GUI application for STT processing with post-processing features
+- **`stt.py`**: Command-line STT processing script
+- **`stt_simple.py`**: Simplified STT script
+- **`main.py`**: Main entry point
+
+### Package Structure
+- **`faster_whisper/`**: Core faster-whisper library
+  - `transcribe.py`: Main transcription functionality
+  - `audio.py`: Audio processing utilities
+  - `feature_extractor.py`: Feature extraction for ML models
+  - `tokenizer.py`: Text tokenization
+  - `vad.py`: Voice Activity Detection
+  - `assets/`: Pre-trained models (Silero VAD ONNX files)
+
+### Testing & Development
+- **`tests/`**: Test suite with audio samples
+  - `data/`: Test audio files (FLAC, MP3, WAV formats)
+  - `test_transcribe.py`: Transcription tests
+  - `test_tokenizer.py`: Tokenizer tests
+  - `test_utils.py`: Utility function tests
+
+### Configuration & Build
+- **`pyproject.toml`**: Modern Python packaging configuration (uv support)
+- **`uv.lock`**: UV package manager lock file
+
+### Additional Resources
+- **`benchmark/`**: Performance benchmarking scripts and test data
+- **`docker/`**: Docker containerization files
+
 ## Development Commands
 
-### Installation for Development
+### Installation for Development (UV Package Manager)
 ```bash
-pip install -e .[dev]
+# Using UV (recommended)
+uv sync
+
+# Traditional pip
+pip install -e .
 ```
 
 ### Testing
@@ -34,19 +72,17 @@ flake8 .
 ### Building Package
 ```bash
 # Build distribution packages
-python setup.py sdist bdist_wheel
+uv build
 ```
 
 ### Model Conversion (Optional)
 ```bash
 # Install conversion dependencies
-pip install -e .[conversion]
+uv add ct2-transformers-converter
 
 # Convert Transformers model to CTranslate2 format
 ct2-transformers-converter --model openai/whisper-base --output_dir whisper-base-ct2
 ```
-
-These commands are automatically run in CI for pull requests.
 
 ## Architecture Overview
 
@@ -77,7 +113,7 @@ This is **faster-whisper**, a high-performance reimplementation of OpenAI's Whis
 - Use AI analysis to extract meaningful content structure and populate template fields
 
 ### AI Integration:
-- Model: qwen2.5:32b (via Ollama API at localhost:11434)
+- Model: qwen3:32b (via Ollama API at localhost:11434)
 - Purpose: Analyze transcribed content and generate structured meeting minutes
 - Fallback: Basic structure if AI analysis fails
 
