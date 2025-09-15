@@ -1,18 +1,49 @@
 import logging
+import os
 
 from threading import Thread
 from typing import Optional
 
 from faster_whisper import WhisperModel
 
-model_path = "large-v3"
-model = WhisperModel(model_path, device="cuda")
+# 벤치마크 설정
+model_path = os.getenv("BENCHMARK_MODEL", "large-v3")
+device = os.getenv("BENCHMARK_DEVICE", "cuda")
+compute_type = os.getenv("BENCHMARK_COMPUTE_TYPE", "float16")
+
+# 모델 초기화 (지연 로딩)
+model = None
+
+def get_model():
+    global model
+    if model is None:
+        print(f"Loading {model_path} model on {device} with {compute_type}...")
+        model = WhisperModel(model_path, device=device, compute_type=compute_type)
+    return model
 
 
-def inference():
-    segments, info = model.transcribe("benchmark.m4a", language="fr")
+def inference(audio_file="benchmark.m4a", language="ko"):
+    """한국어 STT 추론"""
+    model = get_model()
+    segments, info = model.transcribe(
+        audio_file, 
+        language=language,
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters=dict(min_silence_duration_ms=500),
+        temperature=0.0,
+        compression_ratio_threshold=2.4,
+        no_speech_threshold=0.6,
+        condition_on_previous_text=False,
+        initial_prompt="한국어 회의 내용입니다."
+    )
+    
+    transcription = ""
     for segment in segments:
         print("[%.2fs -> %.2fs] %s" % (segment.start, segment.end, segment.text))
+        transcription += segment.text.strip() + " "
+    
+    return transcription.strip(), info
 
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:

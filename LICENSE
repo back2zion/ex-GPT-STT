@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2023 SYSTRAN
+Copyright (c) 2024 Ex-GPT STT Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +20,53 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+## Third-Party Licenses
+
+This project includes and builds upon the following open-source libraries:
+
+### faster-whisper
+- Copyright (c) 2023 SYSTRAN
+- License: MIT License
+- Source: https://github.com/SYSTRAN/faster-whisper
+
+### OpenAI Whisper (Underlying Model)
+- Copyright (c) 2022 OpenAI
+- License: MIT License
+- Source: https://github.com/openai/whisper
+
+### CTranslate2
+- Copyright (c) 2020 OpenNMT
+- License: MIT License
+- Source: https://github.com/OpenNMT/CTranslate2
+
+### Ollama (AI Integration)
+- License: MIT License
+- Source: https://github.com/ollama/ollama
+
+## Attribution
+
+This project is a derivative work based on faster-whisper by SYSTRAN, 
+with additional Korean STT optimization and AI meeting minutes generation 
+capabilities developed by Ex-GPT STT contributors.
+
+The original faster-whisper library provided the foundation for high-performance 
+Whisper model inference using CTranslate2.
+
+## Additional Terms
+
+### AI Model Usage
+- This software integrates with AI models (Qwen3-32B via Ollama) for meeting 
+  minutes generation. Users are responsible for complying with the respective 
+  model licenses and usage terms.
+
+### Data Processing
+- This software processes audio files and generates text transcriptions. 
+  Users are responsible for ensuring compliance with applicable privacy laws 
+  and data protection regulations when processing personal or confidential audio data.
+
+### Export Control
+- This software may be subject to export control laws. Users are responsible 
+  for compliance with applicable export control regulations.
