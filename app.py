@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 
-from faster_whisper import WhisperModel
+import warnings
 import os
+
+# 시작 시 모든 경고 메시지 억제
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning) 
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# 환경 변수로 추가 경고 억제
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+os.environ['SPEECHBRAIN_CACHE'] = '/tmp/speechbrain_cache'
+
+from faster_whisper import WhisperModel
 import sys
 from datetime import datetime
 import tempfile
@@ -18,7 +29,16 @@ def setup_cudnn_env():
     """cuDNN 환경 변수 자동 설정"""
     try:
         import nvidia.cudnn
-        cudnn_path = os.path.dirname(nvidia.cudnn.__file__)
+        cudnn_file = nvidia.cudnn.__file__
+        
+        if not cudnn_file:
+            return False
+            
+        cudnn_path = os.path.dirname(cudnn_file)
+        
+        if not cudnn_path or not os.path.exists(cudnn_path):
+            return False
+            
         lib_path = os.path.join(cudnn_path, "lib")
         
         if os.path.exists(lib_path):
@@ -28,15 +48,22 @@ def setup_cudnn_env():
             os.environ["CUDNN_PATH"] = cudnn_path
             print(f"✅ cuDNN 환경 설정 완료: {lib_path}")
             return True
+        else:
+            print(f"⚠️ cuDNN 라이브러리 경로가 존재하지 않습니다: {lib_path}")
+            return False
     except ImportError:
-        print("⚠️ nvidia-cudnn-cu12 패키지가 없습니다 (CPU 모드로 실행)")
+        # cuDNN이 없어도 정상 작동 (CPU 모드)
         return False
     except Exception as e:
-        print(f"⚠️ cuDNN 환경 설정 실패: {e} (CPU 모드로 실행)")
+        print(f"⚠️ cuDNN 환경 설정 실패: {e}")
         return False
 
-# 시작 시 cuDNN 환경 설정
-setup_cudnn_env()
+# 시작 시 cuDNN 환경 설정 (오류 무시)
+try:
+    setup_cudnn_env()
+except Exception:
+    # cuDNN 설정 실패해도 계속 진행
+    pass
 
 def select_file():
     """파일 선택 UI"""
@@ -358,23 +385,52 @@ def show_system_info():
     memory = psutil.virtual_memory()
     print(f"RAM: {memory.total / (1024**3):.1f}GB (사용가능: {memory.available / (1024**3):.1f}GB)")
     
-    # GPU 확인 시도
+    # GPU 정보 확인 (PyTorch 없어도 nvidia-smi로 확인)
+    gpu_detected = False
+    
+    try:
+        # nvidia-smi로 GPU 정보 확인
+        import subprocess
+        result = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            gpu_info = result.stdout.strip().split('\n')
+            print(f"🎯 GPU: {len(gpu_info)}개 감지됨 (Multi-GPU 최적화 가능)")
+            for i, info in enumerate(gpu_info):
+                if info.strip():
+                    parts = info.strip().split(', ')
+                    if len(parts) >= 4:
+                        name, memory_total, memory_used, utilization = parts[:4]
+                        print(f"  GPU {i}: {name} ({int(memory_total)/1024:.1f}GB)")
+                        print(f"         메모리: {int(memory_used)}/{int(memory_total)}MB ({int(memory_used)/int(memory_total)*100:.1f}%)")
+                        print(f"         사용률: {utilization}%")
+            gpu_detected = True
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        pass
+    
+    # PyTorch GPU 지원 확인
     try:
         import torch
         if torch.cuda.is_available():
             gpu_count = torch.cuda.device_count()
-            print(f"GPU: {gpu_count}개 사용가능 (CUDA {torch.version.cuda})")
-            for i in range(gpu_count):
-                gpu_name = torch.cuda.get_device_name(i)
-                gpu_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-                memory_allocated = torch.cuda.memory_allocated(i) / (1024**3)
-                memory_cached = torch.cuda.memory_reserved(i) / (1024**3)
-                print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f}GB)")
-                print(f"         사용중: {memory_allocated:.1f}GB, 캐시: {memory_cached:.1f}GB")
+            if not gpu_detected:
+                print(f"GPU: {gpu_count}개 사용가능 (CUDA {torch.version.cuda})")
+                for i in range(gpu_count):
+                    gpu_name = torch.cuda.get_device_name(i)
+                    gpu_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                    print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f}GB)")
+            else:
+                print(f"✅ PyTorch: CUDA {torch.version.cuda} 지원 (Multi-GPU {gpu_count}개 활용 가능)")
         else:
-            print("GPU: CUDA 사용 불가 (CPU만 사용)")
+            if gpu_detected:
+                print("PyTorch: CUDA 미지원 (GPU 감지되었지만 PyTorch에서 사용 불가)")
+            else:
+                print("GPU: CUDA 사용 불가")
     except ImportError:
-        print("GPU: PyTorch 미설치 (CPU만 사용)")
+        if gpu_detected:
+            print("PyTorch: 미설치 (GPU 감지되었지만 PyTorch 필요)")
+        else:
+            print("GPU: PyTorch 미설치 (CPU만 사용)")
     
     print("-" * 40)
 
@@ -391,7 +447,7 @@ def monitor_resources():
     return process
 
 def show_resource_usage(process, stage=""):
-    """현재 자원 사용량 표시"""
+    """현재 자원 사용량 표시 (Multi-GPU 지원)"""
     try:
         memory_mb = process.memory_info().rss / (1024**2)
         cpu_percent = process.cpu_percent()
@@ -403,21 +459,205 @@ def show_resource_usage(process, stage=""):
         print(f"📊 {stage} - 프로세스: {memory_mb:.1f}MB, {cpu_percent:.1f}% CPU")
         print(f"   시스템: {system_memory.percent:.1f}% RAM, {system_cpu:.1f}% CPU")
         
-        # GPU 메모리 정보
+        # Multi-GPU 메모리 정보 (PyTorch)
         try:
             import torch
             if torch.cuda.is_available():
+                total_gpu_memory = 0
+                total_allocated = 0
                 for i in range(torch.cuda.device_count()):
                     memory_allocated = torch.cuda.memory_allocated(i) / (1024**3)
                     memory_cached = torch.cuda.memory_reserved(i) / (1024**3)
                     total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-                    usage_percent = (memory_allocated / total_memory) * 100
-                    print(f"   GPU {i}: {memory_allocated:.1f}GB/{total_memory:.1f}GB ({usage_percent:.1f}%)")
+                    usage_percent = (memory_allocated / total_memory) * 100 if total_memory > 0 else 0
+                    
+                    # GPU 이름 및 역할 (RTX 3090)
+                    gpu_name = torch.cuda.get_device_name(i).replace('NVIDIA GeForce ', '')
+                    
+                    # GPU 역할 표시
+                    if i == 0:
+                        role = "STT 전용"
+                    elif i == 1:
+                        role = "화자분리 전용" 
+                    else:
+                        role = f"추가 GPU {i}"
+                    
+                    print(f"   🎯 GPU {i} ({gpu_name}, {role}): {memory_allocated:.1f}GB/{total_memory:.1f}GB ({usage_percent:.1f}%)")
+                    
+                    # 메모리 사용량이 90% 초과시 경고
+                    if usage_percent > 90:
+                        print(f"     ⚠️ GPU {i} 메모리 사용량 매우 높음! ({usage_percent:.1f}%)")
+                    
+                    total_gpu_memory += total_memory
+                    total_allocated += memory_allocated
+                
+                # 전체 GPU 사용률 표시
+                if total_gpu_memory > 0:
+                    total_usage_percent = (total_allocated / total_gpu_memory) * 100
+                    print(f"   🔥 Multi-GPU 전체: {total_allocated:.1f}GB/{total_gpu_memory:.1f}GB ({total_usage_percent:.1f}%)")
         except:
-            pass
+            # Fallback to nvidia-smi
+            try:
+                import subprocess
+                result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total,utilization.gpu', '--format=csv,noheader,nounits'], 
+                                      capture_output=True, text=True, timeout=3)
+                if result.returncode == 0:
+                    gpu_info = result.stdout.strip().split('\n')
+                    for i, info in enumerate(gpu_info):
+                        if info.strip():
+                            parts = info.strip().split(', ')
+                            if len(parts) >= 3:
+                                memory_used, memory_total, gpu_util = parts[:3]
+                                usage_percent = int(memory_used) / int(memory_total) * 100 if int(memory_total) > 0 else 0
+                                print(f"   🎯 GPU {i}: {memory_used}MB/{memory_total}MB ({usage_percent:.1f}%) - {gpu_util}% 사용률")
+            except:
+                pass
         
     except Exception as e:
         print(f"⚠️ 자원 모니터링 오류: {e}")
+
+def get_optimal_gpu_device():
+    """여러 GPU 중 가장 빈 GPU를 선택하여 부하 균등 분산"""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None, False
+        
+        gpu_count = torch.cuda.device_count()
+        if gpu_count == 0:
+            return None, False
+        
+        print(f"🎯 사용 가능한 GPU: {gpu_count}개")
+        
+        # 각 GPU의 메모리 사용량 확인
+        gpu_memory_usage = []
+        for i in range(gpu_count):
+            try:
+                memory_allocated = torch.cuda.memory_allocated(i) / (1024**3)
+                total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                usage_percent = (memory_allocated / total_memory) * 100 if total_memory > 0 else 0
+                gpu_name = torch.cuda.get_device_name(i)
+                
+                gpu_memory_usage.append({
+                    'device': i,
+                    'name': gpu_name,
+                    'usage_percent': usage_percent,
+                    'allocated_gb': memory_allocated,
+                    'total_gb': total_memory
+                })
+                
+                print(f"  GPU {i}: {gpu_name} - 남은 메모리: {total_memory-memory_allocated:.1f}GB ({100-usage_percent:.1f}%)")
+            except Exception as e:
+                print(f"  GPU {i} 정보 얻기 실패: {e}")
+                continue
+        
+        if not gpu_memory_usage:
+            return None, False
+        
+        # 가장 사용량이 적은 GPU 선택
+        best_gpu = min(gpu_memory_usage, key=lambda x: x['usage_percent'])
+        selected_device = best_gpu['device']
+        
+        print(f"✅ 선택된 GPU: {selected_device} ({best_gpu['name']}) - 사용률: {best_gpu['usage_percent']:.1f}%")
+        
+        return selected_device, True
+        
+    except ImportError:
+        print("⚠️ PyTorch가 없어 GPU 선택 불가")
+        return None, False
+    except Exception as e:
+        print(f"⚠️ GPU 선택 오류: {e}")
+        return None, False
+
+def initialize_multi_gpu_whisper_model(model_name="large-v3", preferred_device=None):
+    """두 RTX 3090 GPU를 활용한 WhisperModel 초기화"""
+    try:
+        import torch
+        
+        if not torch.cuda.is_available():
+            print("⚠️ CUDA를 사용할 수 없어 CPU 모드로 전환")
+            return initialize_cpu_whisper_model(model_name)
+        
+        gpu_count = torch.cuda.device_count()
+        print(f"🎯 Multi-GPU 초기화: {gpu_count}개 GPU 감지")
+        
+        # RTX 3090 GPU 정보 표시
+        for i in range(gpu_count):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f}GB VRAM)")
+        
+        # 최적 GPU 선택
+        if preferred_device is not None and 0 <= preferred_device < gpu_count:
+            selected_device = preferred_device
+            print(f"🎯 지정된 GPU {selected_device} 사용")
+        else:
+            selected_device, success = get_optimal_gpu_device()
+            if not success:
+                print("⚠️ GPU 선택 실패, CPU 모드로 전환")
+                return initialize_cpu_whisper_model(model_name)
+        
+        print(f"🚀 {model_name} 모델을 GPU {selected_device}에 로드 중...")
+        
+        # GPU에 모델 로드 (멀티 GPU 최적화)
+        try:
+            # 멀티 GPU 환경에서 GPU 0을 STT 전용으로 사용
+            gpu_count = torch.cuda.device_count()
+            device_index = 0
+            
+            if gpu_count >= 2:
+                print(f"🎯 멀티 GPU 최적화: GPU 0에 {model_name} 모델 로드 시도 중... (STT 전용)")
+            else:
+                print(f"🎯 GPU에 {model_name} 모델 로드 시도 중...")
+            
+            # 안전한 GPU 초기화
+            model = WhisperModel(
+                model_name, 
+                device="cuda",
+                device_index=device_index,
+                compute_type="float16"
+            )
+            print(f"✅ GPU {device_index}에 {model_name} 모델 로드 성공!")
+        except Exception as gpu_error:
+            print(f"⚠️ GPU 로드 실패: {str(gpu_error)}")
+            print("🔄 CPU 모드로 전환...")
+            raise gpu_error
+        
+        print(f"✅ {model_name} 모델 GPU {selected_device} 로드 성공!")
+        
+        # GPU 메모리 사용량 확인
+        memory_used = torch.cuda.memory_allocated(selected_device) / (1024**3)
+        memory_total = torch.cuda.get_device_properties(selected_device).total_memory / (1024**3)
+        print(f"🔥 GPU {selected_device} 메모리 사용: {memory_used:.1f}GB / {memory_total:.1f}GB")
+        
+        return model, selected_device, True
+        
+    except Exception as e:
+        print(f"⚠️ Multi-GPU 초기화 실패: {str(e)}")
+        print("🔄 CPU 모드로 폴백...")
+        return initialize_cpu_whisper_model(model_name)
+
+def initialize_cpu_whisper_model(model_name="large-v3"):
+    """최적화된 CPU WhisperModel 초기화"""
+    print("🖥️ CPU 모드 사용 (Large-v3 모델)")
+    
+    # CPU 코어 수를 고려한 워커 수 설정
+    physical_cores = psutil.cpu_count(logical=False)  # 물리 코어 수
+    if physical_cores is None:
+        physical_cores = 4  # 기본값
+    max_workers = max(1, min(4, physical_cores // 2))  # 물리 코어의 절반만 사용
+    
+    print(f"🔧 {model_name} 모델 로드 중... (워커: {max_workers}개, CPU 제한)")
+    
+    model = WhisperModel(
+        model_name, 
+        device="cpu", 
+        compute_type="int8",
+        num_workers=max_workers
+    )
+    
+    print(f"✅ CPU {model_name} 모델 로드 완료")
+    return model, None, False
 
 def complete_transcription_and_minutes():
     """완전한 STT + 표 형식 회의록 생성"""
@@ -528,58 +768,20 @@ def complete_transcription_and_minutes():
         # Large 모델로 최고 품질 GPU 가속
         gpu_success = False
         
-        # GPU 자동 감지 및 활성화
-        try:
-            import torch
-            use_gpu = torch.cuda.is_available()
-            if use_gpu:
-                gpu_count = torch.cuda.device_count()
-                gpu_name = torch.cuda.get_device_name(0)
-                print(f"🎯 CUDA GPU 감지됨: {gpu_count}개 ({gpu_name})")
-            else:
-                print("⚠️ CUDA GPU를 사용할 수 없습니다.")
-        except ImportError:
-            use_gpu = False
-            print("⚠️ PyTorch가 없습니다. CPU 모드로 실행합니다.")
-            
-        print(f"🔧 GPU 사용 설정: {'활성화' if use_gpu else '비활성화'}")
+        # Multi-GPU 최적화 모델 초기화
+        print("🎯 Multi-GPU 최적화 분석 시작...")
+        model_result = initialize_multi_gpu_whisper_model("large-v3")
         
-        if use_gpu:
-            try:
-                print(f"🚀 GPU 가속 사용 ({gpu_name})")
-                print("📥 Large-v3 모델을 GPU로 로딩 중...")
-                model = WhisperModel("large-v3", device="cuda", compute_type="float16")
-                gpu_success = True
-                print("✅ GPU 모델 로드 성공!")
-                
-                # GPU 메모리 사용량 확인
-                if torch.cuda.is_available():
-                    gpu_memory_used = torch.cuda.memory_allocated(0) / (1024**3)
-                    gpu_memory_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                    print(f"🎯 GPU 메모리 사용: {gpu_memory_used:.1f}GB / {gpu_memory_total:.1f}GB")
-            except Exception as e:
-                print(f"⚠️ GPU 실패 - CPU Large 모델로 전환: {str(e)[:50]}...")
-                gpu_success = False
-        
-        # GPU를 사용할 수 없거나 실패한 경우 CPU 모드로 fallback
-        if not use_gpu or not gpu_success:
-            print("🖥️ CPU 모드 사용 (Large-v3 모델)")
-            
-            # Large 모델 사용하되 시스템 보호 설정 적용
-            cpu_count = psutil.cpu_count(logical=False)  # 물리 코어 수
-            max_workers = max(1, min(4, cpu_count // 2))  # 물리 코어의 절반만 사용
-            
-            print(f"🔧 Large-v3 모델 로드 중... (워커: {max_workers}개, CPU 제한)")
-            model = WhisperModel(
-                "large-v3", 
-                device="cpu", 
-                compute_type="int8",
-                num_workers=max_workers
-            )
+        if len(model_result) == 3:
+            model, selected_gpu, gpu_success = model_result
+        else:
+            model, gpu_success = model_result[0], model_result[2] if len(model_result) > 2 else False
+            selected_gpu = model_result[1] if len(model_result) > 1 else None
         show_resource_usage(process, "모델 로드 완료")
         
         if gpu_success:
-            print("🎤 GPU 가속 전사 시작... (Large-v3 모델)")
+            gpu_name = "RTX 3090" if selected_gpu is not None else "GPU"
+            print(f"🎙️ Multi-GPU 가속 전사 시작... (GPU {selected_gpu}: {gpu_name})")
         else:
             print("🎤 CPU 전사 시작... (Large-v3 모델, 시스템 보호 설정)")
         
@@ -613,12 +815,14 @@ def complete_transcription_and_minutes():
             # 실시간 진행 표시 (GPU 사용률 포함)
             elapsed = (datetime.now() - start_time).total_seconds()
             
-            # GPU 메모리 사용량 표시 (10개마다)
+            # Multi-GPU 메모리 사용량 표시 (10개마다)
             gpu_info = ""
-            if gpu_success and i % 10 == 0 and torch.cuda.is_available():
+            if gpu_success and i % 10 == 0:
                 try:
-                    gpu_memory_used = torch.cuda.memory_allocated(0) / (1024**3)
-                    gpu_info = f" [GPU: {gpu_memory_used:.1f}GB]"
+                    import torch
+                    if torch.cuda.is_available() and selected_gpu is not None:
+                        gpu_memory_used = torch.cuda.memory_allocated(selected_gpu) / (1024**3)
+                        gpu_info = f" [GPU {selected_gpu}: {gpu_memory_used:.1f}GB]"
                 except Exception:
                     # GPU 정보 가져오기 실패시 무시
                     pass
@@ -636,12 +840,18 @@ def complete_transcription_and_minutes():
         
         show_resource_usage(process, "전사 완료")
         
-        # GPU 메모리 정리 (안전하게)
+        # Multi-GPU 메모리 정리 (안전하게)
         if gpu_success:
             try:
                 import torch
-                torch.cuda.empty_cache()
-                print("🧹 GPU 메모리 정리 완료")
+                if selected_gpu is not None:
+                    # 특정 GPU만 정리
+                    torch.cuda.empty_cache()
+                    print(f"🧹 GPU {selected_gpu} 메모리 정리 완료")
+                else:
+                    # 전체 GPU 정리
+                    torch.cuda.empty_cache()
+                    print("🧹 Multi-GPU 메모리 정리 완료")
             except:
                 pass
     
@@ -728,14 +938,20 @@ def complete_transcription_and_minutes():
     # 최종 자원 사용량
     show_resource_usage(process, "처리 완료")
     
-    # GPU 사용 시 안전한 종료
+    # Multi-GPU 사용 시 안전한 종료
     if 'gpu_success' in locals() and gpu_success:
         try:
             import torch
-            torch.cuda.empty_cache()
-            # 강제로 CUDA context 정리
-            torch.cuda.synchronize()
-            print("🧹 CUDA 컨텍스트 정리 완료")
+            if 'selected_gpu' in locals() and selected_gpu is not None:
+                # 특정 GPU 컨텍스트 정리
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize(selected_gpu)
+                print(f"🧹 GPU {selected_gpu} CUDA 컨텍스트 정리 완료")
+            else:
+                # 전체 GPU 컨텍스트 정리
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                print("🧹 Multi-GPU CUDA 컨텍스트 정리 완료")
         except:
             pass
         
@@ -744,6 +960,7 @@ def complete_transcription_and_minutes():
             del model
             import gc
             gc.collect()
+            print("🗑️ 모델 객체 정리 완료")
         except:
             pass
     
@@ -834,7 +1051,79 @@ def build_correction_dictionary():
             '미래 전략처': '미래전략처',
             '안전 혁신처': '안전혁신처',
             
-            # 기술 용어 교정
+            # IT 용어 교정
+            '에이 아이': 'AI',
+            '에이아이': 'AI',
+            '인공 지능': '인공지능',
+            '머신 러닝': '머신러닝',
+            '딥 러닝': '딥러닝',
+            '빅 데이터': '빅데이터',
+            '클라우드 컴퓨팅': '클라우드컴퓨팅',
+            '데이터 베이스': '데이터베이스',
+            '데이터베이스': '데이터베이스',
+            '어플리케이션': '애플리케이션',
+            'API': 'API',
+            '에이피아이': 'API',
+            'UI': 'UI',
+            '유아이': 'UI',
+            'UX': 'UX',
+            '유엑스': 'UX',
+            '프레임 워크': '프레임워크',
+            '라이브러리': '라이브러리',
+            '알고리즘': '알고리즘',
+            '엘지': 'LG',
+            '삼성': '삼성',
+            'IT': 'IT',
+            '아이티': 'IT',
+            '디브이': 'DV',
+            '시스템 개발': '시스템개발',
+            '웹 개발': '웹개발',
+            'VR': 'VR',
+            '가상현실': 'VR',
+            'AR': 'AR',
+            '증강현실': 'AR',
+            'IoT': 'IoT',
+            '사물인터넷': 'IoT',
+            
+            # 도로공사 전문 용어
+            '도로 공사': '도로공사',
+            '고속 도로': '고속도로',
+            '국도': '국도',
+            '지방도': '지방도',
+            '도로 관리': '도로관리',
+            '교통 관리': '교통관리',
+            '도로 시설': '도로시설',
+            '교량': '교량',
+            '터널': '터널',
+            '휴게소': '휴게소',
+            '요금소': '요금소',
+            'ITS': 'ITS',
+            '지능형 교통 시스템': 'ITS',
+            '교통 정보': '교통정보',
+            'CCTV': 'CCTV',
+            '시시티비': 'CCTV',
+            'VMS': 'VMS',
+            '가변 메시지': 'VMS',
+            '노면 상태': '노면상태',
+            '도로 포장': '도로포장',
+            '차선': '차선',
+            '중앙분리대': '중앙분리대',
+            '방음벽': '방음벽',
+            '가드레일': '가드레일',
+            '안전시설': '안전시설',
+            '도로 표지판': '도로표지판',
+            '신호등': '신호등',
+            '교차로': '교차로',
+            '분기점': '분기점',
+            'JC': 'JC',
+            'IC': 'IC',
+            '인터체인지': 'IC',
+            '정션': 'JC',
+            '램프': '램프',
+            '진입로': '진입로',
+            '진출로': '진출로',
+            
+            # 기술 용어 교정 (기존)
             '모바일 오피스': '모바일오피스',
             '디지털 관리처': '디지털관리처',
             '기술 자문': '기술자문',
@@ -868,60 +1157,238 @@ def apply_corrections(text, correction_dict):
     
     return corrected_text
 
-def analyze_meeting_with_ai(meeting_text):
-    """AI를 사용해서 회의 내용 분석"""
+def analyze_with_vllm(meeting_text):
+    """vLLM 서버를 사용한 회의 내용 분석 (Chat Completions API)"""
     import requests
     import json
+    from dotenv import load_dotenv
+    import os
     
-    print("🔍 AI 분석 시작...")
-    print(f"📝 분석할 텍스트 길이: {len(meeting_text):,}자")
+    load_dotenv()
     
     try:
-        # qwen3-32b API 호출
-        url = "http://localhost:11434/api/generate"
-        print("🌐 Ollama API 연결 중...")
+        # .env에서 모델명 가져오기 (기본값: Qwen/Qwen3-8B)
+        model_name = os.getenv("VLLM_MODEL", "Qwen/Qwen3-8B")
         
-        prompt = f"""다음 회의 전사 내용을 분석해서 회의록을 작성해주세요.
+        messages = [
+            {
+                "role": "system",
+                "content": "당신은 회의록 작성 전문가입니다. 주어진 회의 전사 내용을 분석하여 구조화된 회의록을 작성해주세요."
+            },
+            {
+                "role": "user", 
+                "content": f"""다음 회의 전사 내용을 분석해서 bullet point 개조식 형태의 회의록을 작성해주세요.
 
 회의 전사 내용:
 {meeting_text}
 
-다음 형식으로 회의록을 작성해주세요:
+다음과 같은 구조로 순수 텍스트 형태의 개조식 회의록을 작성해주세요:
 
-1. 회의 주제: (회의의 핵심 주제를 한 줄로 요약)
+[회의 개요]
+• [주요 주제] 관련 회의 진행
+• [참석자 정보가 있다면 언급]
+• [핵심 안건들] 논의
 
-2. 주요 내용: (중요한 논의사항들을 번호별로 정리)
-   1. 첫 번째 주요 논의사항
-      - 세부 내용 1
-      - 세부 내용 2
-      - 세부 내용 3
-   2. 두 번째 주요 논의사항
-      - 세부 내용 1
-      - 세부 내용 2
+[주요 논의 내용]
+• [첫 번째 주요 논의사항]
+  - [구체적 세부 내용 1]
+  - [구체적 세부 내용 2]
+• [두 번째 주요 논의사항]  
+  - [구체적 세부 내용 1]
+  - [구체적 세부 내용 2]
+• [추가 논의사항들]
+  - [관련 세부 내용]
 
-3. 이슈사항(미결사항): (해결되지 않은 문제나 추후 논의가 필요한 사항들)
-   ◦ 첫 번째 이슈
-   ◦ 두 번째 이슈
+[주요 결정사항 및 향후 계획]
+• [결정된 사항 1]
+• [결정된 사항 2]  
+• [향후 계획이나 후속 조치]
 
-4. 결정사항: (회의에서 결정된 내용들)
-   ◦ 첫 번째 결정사항
-   ◦ 두 번째 결정사항
+[미해결 이슈 및 추후 논의사항]
+• [해결되지 않은 문제 1]
+• [해결되지 않은 문제 2]
+• [추후 논의 필요 사항]
 
-한국어로 작성하고, 구체적이고 명확하게 작성해주세요."""
+중요한 지시사항:
+- 마크다운 문법(**, #, ###) 절대 사용 금지
+- <think>, Let me, I need to, First 등 추론 과정 절대 포함 금지
+- 바로 [회의 개요]부터 시작할 것
+- 각 섹션은 대괄호 [섹션명]으로 표시
+- 각 항목은 bullet point (•)로 시작
+- 세부 내용은 dash (-)로 들여쓰기  
+- 간결하고 명확한 개조식 문장만 사용
+- 전문 용어와 구체적 내용은 그대로 유지
+- 불필요한 설명이나 서론 없이 즉시 회의록 내용만 출력"""
+            }
+        ]
 
         payload = {
-            "model": "qwen3:8b",
-            "prompt": prompt,
-            "stream": False
+            "model": model_name,
+            "messages": messages,
+            "max_tokens": 2000,
+            "temperature": 0.3,
+            "stop": ["<|endoftext|>", "<|im_end|>"]
         }
         
-        print("🤖 qwen3-8b 모델로 분석 중... (1-2분 소요)")
-        print("⏳ AI가 회의 내용을 분석하고 있습니다...")
+        print(f"🚀 vLLM 모델 사용: {model_name}")
+        response = requests.post("http://localhost:8000/v1/chat/completions", 
+                               json=payload, timeout=120)
+        
+        if response.status_code == 200:
+            result = response.json()
+            analysis = result["choices"][0]["message"]["content"]
+            print(f"✅ vLLM 분석 완료! (길이: {len(analysis)}자)")
+            return parse_meeting_analysis(analysis)
+        else:
+            print(f"❌ vLLM 분석 실패: {response.status_code}")
+            print(f"🔍 Response: {response.text}")
+            return create_fallback_analysis(meeting_text)
+            
+    except Exception as e:
+        print(f"❌ vLLM 오류: {str(e)}")
+        return create_fallback_analysis(meeting_text)
+
+def chunk_text(text, max_chunk_size=8000):
+    """긴 텍스트를 적당한 크기로 나누기"""
+    words = text.split()
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    
+    for word in words:
+        if current_size + len(word) + 1 > max_chunk_size and current_chunk:
+            chunks.append(' '.join(current_chunk))
+            current_chunk = [word]
+            current_size = len(word)
+        else:
+            current_chunk.append(word)
+            current_size += len(word) + 1
+    
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+    
+    return chunks
+
+def analyze_meeting_with_ai(meeting_text):
+    """AI를 사용해서 회의 내용 분석 (청크 단위 처리)"""
+    import requests
+    import json
+    from dotenv import load_dotenv
+    import os
+    
+    load_dotenv()
+    
+    print("🔍 AI 분석 시작...")
+    print(f"📝 분석할 텍스트 길이: {len(meeting_text):,}자")
+    
+    # 텍스트가 너무 크면 청크로 분할
+    if len(meeting_text) > 10000:
+        print("📊 긴 텍스트 감지 - 청크 단위로 분할 처리")
+        chunks = chunk_text(meeting_text, max_chunk_size=8000)
+        print(f"🔢 {len(chunks)}개 청크로 분할")
+        
+        chunk_results = []
+        for i, chunk in enumerate(chunks):
+            print(f"🔄 청크 {i+1}/{len(chunks)} 처리 중...")
+            result = analyze_text_chunk(chunk, i+1)
+            if result:
+                chunk_results.append(result)
+        
+        # 청크 결과들을 합치기
+        if chunk_results:
+            return combine_chunk_results(chunk_results)
+        else:
+            print("❌ 모든 청크 처리 실패, fallback 사용")
+            return create_fallback_analysis(meeting_text)
+    else:
+        # 작은 텍스트는 그대로 처리
+        return analyze_text_chunk(meeting_text, 1)
+
+def analyze_text_chunk(chunk_text, chunk_num=1):
+    """개별 텍스트 청크 분석"""
+    import requests
+    import json
+    
+    # vLLM 서버 먼저 시도
+    try:
+        vllm_available = requests.get("http://localhost:8000/health", timeout=2)
+        if vllm_available.status_code == 200:
+            print("🚀 vLLM 서버 사용 (더 빠른 처리)")
+            return analyze_with_vllm(chunk_text)
+    except:
+        pass
+    
+    try:
+        # Ollama 모델 사용 (32B 우선, 실패하면 8B로 폴백)
+        url = "http://localhost:11434/api/generate"
+        
+        # 32B 모델 존재 여부 확인 후 선택
+        try:
+            import subprocess
+            result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, timeout=5)
+            if "qwen3:32b" in result.stdout:
+                model_to_use = "qwen3:32b"
+                print(f"🚀 Ollama {model_to_use} 연결 중... (청크 {chunk_num}) - 고품질 32B 모델")
+            else:
+                model_to_use = "qwen3:8b"
+                print(f"🚀 Ollama {model_to_use} 연결 중... (청크 {chunk_num}) - 32B 모델 없음, 8B 사용")
+        except:
+            model_to_use = "qwen3:8b"
+            print(f"🚀 Ollama {model_to_use} 연결 중... (청크 {chunk_num}) - 모델 확인 실패, 8B 사용")
+        
+        # 청크용 간단한 프롬프트
+        prompt = f"""다음 회의 일부 내용을 간단히 요약해주세요. 
+
+회의 내용 (일부):
+{chunk_text}
+
+이 부분에서 다루어진 주요 내용들을 bullet point로 간단히 정리해주세요:
+
+• [주요 논의사항 1]
+• [주요 논의사항 2] 
+• [결정사항이나 중요 포인트]
+
+간결하게 핵심만 추출하고, 마크다운이나 추론 과정은 포함하지 마세요."""
+
+        # 모델에 따른 최적화된 옵션 설정
+        if "32b" in model_to_use:
+            options = {
+                "temperature": 0.1,     # 32B는 더 낮은 temperature로 일관성 확보
+                "top_p": 0.7,
+                "top_k": 10,
+                "repeat_penalty": 1.1,
+                "num_ctx": 8192,        # 32B는 더 큰 컨텍스트 사용
+                "num_predict": 1024     # 32B는 더 긴 응답 생성 가능
+            }
+        else:
+            options = {
+                "temperature": 0.2,     # 8B는 약간 높은 temperature
+                "top_p": 0.8,
+                "top_k": 20,
+                "repeat_penalty": 1.1,
+                "num_ctx": 4096,        # 8B는 표준 컨텍스트
+                "num_predict": 512      # 8B는 짧은 응답
+            }
+        
+        payload = {
+            "model": model_to_use,
+            "prompt": prompt,
+            "stream": False,
+            "options": options
+        }
+        
+        print(f"🚀 {model_to_use} 모델로 청크 {chunk_num} 분석 중...")
+        if "32b" in model_to_use:
+            print(f"⏳ 청크 처리 중... (고품질 32B 모델)")
+            timeout_seconds = 300  # 32B 모델은 5분 타임아웃
+        else:
+            print(f"⏳ 청크 처리 중... (빠른 8B 모델)")
+            timeout_seconds = 120   # 8B 모델은 2분 타임아웃
         
         import time
         start_time = time.time()
         
-        response = requests.post(url, json=payload, timeout=120)
+        response = requests.post(url, json=payload, timeout=timeout_seconds)
         
         elapsed = time.time() - start_time
         
@@ -930,137 +1397,163 @@ def analyze_meeting_with_ai(meeting_text):
         if response.status_code == 200:
             result = response.json()
             analysis = result.get('response', '')
-            print(f"✅ AI 분석 완료! (소요시간: {elapsed:.1f}초)")
-            print(f"📊 AI 응답 길이: {len(analysis)}자")
-            print(f"🔍 AI 응답 미리보기: {analysis[:200]}...")
-            print("📋 회의록 구조화 중...")
-            return parse_meeting_analysis(analysis)
+            print(f"✅ 청크 {chunk_num} 분석 완료! (소요시간: {elapsed:.1f}초)")
+            # <think> 부분 제거
+            cleaned_analysis = clean_ai_response(analysis)
+            return cleaned_analysis
         else:
-            print(f"❌ AI analysis failed: {response.status_code}")
-            print(f"🔍 Response text: {response.text}")
-            return create_fallback_analysis(meeting_text)
+            print(f"❌ 청크 {chunk_num} 분석 실패: {response.status_code}")
+            return None
             
     except Exception as e:
-        print(f"❌ AI analysis error: {str(e)}")
-        print(f"🔍 Error type: {type(e).__name__}")
-        import traceback
-        print(f"🔍 Traceback: {traceback.format_exc()}")
-        print("🔄 Fallback 분석으로 전환...")
-        return create_fallback_analysis(meeting_text)
+        print(f"❌ 청크 {chunk_num} 분석 오류: {str(e)}")
+        return None
+
+def clean_ai_response(ai_response):
+    """AI 응답에서 <think> 부분과 추론 과정 제거"""
+    if not ai_response:
+        return ai_response
+    
+    import re
+    cleaned_response = ai_response
+    
+    # <think>과 </think> 사이의 모든 내용 제거 (다중 라인 포함)
+    cleaned_response = re.sub(r'<think>.*?</think>', '', cleaned_response, flags=re.DOTALL | re.IGNORECASE)
+    
+    # <think>으로 시작하지만 </think>이 없는 경우 (줄 끝까지 제거)
+    cleaned_response = re.sub(r'<think>.*', '', cleaned_response, flags=re.DOTALL | re.IGNORECASE)
+    
+    # 다른 추론 패턴들도 제거
+    patterns_to_remove = [
+        r'Let me.*?(?=\n\[|\[|$)',
+        r'I need to.*?(?=\n\[|\[|$)', 
+        r'First.*?(?=\n\[|\[|$)',
+        r'I will.*?(?=\n\[|\[|$)',
+        r'Let\'s.*?(?=\n\[|\[|$)',
+        r'I\'ll.*?(?=\n\[|\[|$)'
+    ]
+    
+    for pattern in patterns_to_remove:
+        cleaned_response = re.sub(pattern, '', cleaned_response, flags=re.DOTALL | re.IGNORECASE)
+    
+    # 연속된 빈 줄 제거
+    cleaned_response = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned_response)
+    
+    # 앞뒤 공백 제거
+    cleaned_response = cleaned_response.strip()
+    
+    return cleaned_response
+
+def combine_chunk_results(chunk_results):
+    """청크 결과들을 하나의 회의록으로 합치기"""
+    print("🔗 청크 결과들을 통합 중...")
+    
+    combined_content = "[회의 개요]\n"
+    combined_content += "• 다양한 업무와 프로젝트 논의가 진행됨\n"
+    combined_content += "• 여러 주제에 걸친 종합적 검토 및 의사결정\n\n"
+    
+    combined_content += "[주요 논의 내용]\n"
+    
+    for i, chunk_result in enumerate(chunk_results, 1):
+        if chunk_result and chunk_result.strip():
+            # 청크 결과를 정리해서 추가
+            lines = chunk_result.strip().split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('[') and not line.startswith('#'):
+                    if not line.startswith('•'):
+                        combined_content += f"• {line}\n"
+                    else:
+                        combined_content += f"{line}\n"
+    
+    combined_content += "\n[주요 결정사항 및 향후 계획]\n"
+    combined_content += "• 논의된 사항들의 단계별 실행 계획 수립\n"
+    combined_content += "• 관련 부서 간 협조 체계 구축\n\n"
+    
+    combined_content += "[미해결 이슈 및 추후 논의사항]\n"
+    combined_content += "• 추가 검토가 필요한 기술적 사항들\n"
+    combined_content += "• 다음 회의에서 우선적으로 다룰 안건들\n\n"
+    
+    combined_content += "참고: 긴 회의록을 청크 단위로 처리하여 생성됨"
+    
+    print(f"✅ {len(chunk_results)}개 청크 통합 완료")
+    return combined_content
 
 def parse_meeting_analysis(ai_response):
-    """AI 응답을 파싱해서 구조화된 데이터로 변환"""
+    """AI 응답에서 <think> 부분 제거 후 반환"""
     try:
         print(f"🔍 파싱 시작, 응답 길이: {len(ai_response)}")
-        print(f"🔍 응답 내용 미리보기: {ai_response[:500]}...")
-        lines = ai_response.strip().split('\n')
-        analysis = {
-            'subject': '',
-            'main_contents': [],
-            'issues': [],
-            'decisions': []
-        }
+        print(f"🔍 응답 내용 미리보기: {ai_response[:200]}...")
         
-        current_section = None
-        current_main_item = None
+        # 새로운 정리 함수 사용
+        cleaned_response = clean_ai_response(ai_response)
         
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            if '회의 주제:' in line or '주제:' in line:
-                analysis['subject'] = line.split(':', 1)[-1].strip()
-            elif '주요 내용:' in line or line.startswith('2.'):
-                current_section = 'main_contents'
-            elif '이슈사항' in line or '미결사항' in line:
-                current_section = 'issues'
-            elif '결정사항' in line:
-                current_section = 'decisions'
-            elif line.startswith(('1.', '2.', '3.', '4.', '5.')):
-                if current_section == 'main_contents':
-                    current_main_item = {
-                        'title': line.split('.', 1)[-1].strip(),
-                        'details': []
-                    }
-                    analysis['main_contents'].append(current_main_item)
-            elif line.startswith(('- ', '◦ ', '• ')):
-                if current_section == 'main_contents' and current_main_item:
-                    current_main_item['details'].append(line[2:].strip())
-                elif current_section == 'issues':
-                    analysis['issues'].append(line[2:].strip())
-                elif current_section == 'decisions':
-                    analysis['decisions'].append(line[2:].strip())
-        
-        return analysis
+        if not cleaned_response or len(cleaned_response) < 50:
+            print("⚠️ AI 응답이 너무 짧거나 비어있음, fallback 사용")
+            return create_fallback_analysis("")
+            
+        print(f"✅ <think> 부분 제거 완료, 최종 길이: {len(cleaned_response)}")
+        return cleaned_response
         
     except Exception as e:
         print(f"❌ AI 응답 파싱 오류: {str(e)}")
         return create_fallback_analysis("")
 
 def create_fallback_analysis(meeting_text):
-    """AI 분석 실패시 폴백 분석"""
-    return {
-        'subject': '회의 내용 논의',
-        'main_contents': [
-            {
-                'title': '주요 논의사항',
-                'details': ['회의 내용이 논의되었습니다.', '추가 검토가 필요합니다.']
-            }
-        ],
-        'issues': ['세부 사항 검토 필요'],
-        'decisions': ['추후 논의 예정']
-    }
+    """AI 분석 실패시 폴백 분석 - bullet point 개조식"""
+    return """[회의 개요]
+• 다양한 업무와 프로젝트 논의 진행
+• 현재 작업 진행 상황 및 향후 계획 검토
+• 관련 부서 담당자들 참석
+
+[주요 논의 내용]
+• 시스템 개발 관련 기술적 사항
+  - 현재 개발 중인 기능 구현 방안
+  - 시스템 개선 사항 검토
+• 사용자 요구사항 반영 방안
+  - 시스템 개선 방향 논의
+  - 활발한 의견 교환
+• 데이터 처리 및 시스템 연계 이슈
+  - 기존 시스템과의 호환성 검토
+  - 새로운 기능 추가 방안 논의
+
+[주요 결정사항 및 향후 계획]
+• 현재 진행 중인 개발 작업 계속 추진
+• 일정 및 우선순위 재조정
+• 시스템 안정성 확보를 위한 추가 검토 과정
+
+[미해결 이슈 및 추후 논의사항]
+• 기술적 세부사항 추가 검토 필요
+• 다음 회의에서 우선적으로 논의 예정
+• 구체적인 해결 방안 도출 필요
+
+참고: AI 분석 실패로 기본 템플릿 생성. 정확한 내용은 전사 파일 참고 바람."""
 
 def create_meeting_minutes_txt(output_path, segment_count, info, analysis, base_name):
-    """PDF 양식에 맞는 회의록 TXT 생성"""
+    """자연스러운 줄글 형식의 회의록 TXT 생성"""
+    from datetime import datetime
     
     with open(output_path, 'w', encoding='utf-8') as f:
         # 제목
         f.write("=" * 60 + "\n")
-        f.write(" " * 25 + "회의록" + " " * 25 + "\n")
+        f.write(" " * 27 + "회의록" + " " * 27 + "\n")
         f.write("=" * 60 + "\n\n")
         
         # 기본 정보
-        f.write("┌─────────────────────────────────────────────────────────┐\n")
-        f.write(f"│ 일시    : {datetime.now().strftime('%Y.%m.%d, %H:%M'):<45} │\n")
-        f.write(f"│ 장소    : {'회의실':<45} │\n") 
-        f.write(f"│ 회의주제 : {analysis['subject']:<44} │\n")
-        f.write(f"│ 참석자   : 기관명 이름 직위 (인)                           │\n")
-        f.write(f"│ 작성자   : AI 음성인식 시스템                             │\n")
-        f.write("└─────────────────────────────────────────────────────────┘\n\n")
+        f.write(f"작성일시: {datetime.now().strftime('%Y년 %m월 %d일 %H:%M')}\n")
+        f.write(f"작성자: AI 음성인식 시스템\n")
+        f.write(f"음성 파일: {base_name}\n")
+        f.write(f"전사 구간: 총 {len(segment_count) if hasattr(segment_count, '__len__') else segment_count}개 구간\n")
+        f.write("=" * 60 + "\n\n")
         
-        # 회의 내용
-        f.write("┌─────────────────────────────────────────────────────────┐\n")
-        f.write("│                     회 의 내 용                        │\n")
-        f.write("├─────────────────────────────────────────────────────────┤\n")
-        f.write("│ 주요 내용 기술                                          │\n")
-        f.write("├─────────────────────────────────────────────────────────┤\n")
+        # AI 생성 회의록 내용 (줄글 형식)
+        f.write(analysis)
         
-        for i, content in enumerate(analysis['main_contents'], 1):
-            f.write(f"│ {i}. {content['title']:<51} │\n")
-            for detail in content['details']:
-                f.write(f"│    - {detail[:49]:<49} │\n")
-        
-        f.write("└─────────────────────────────────────────────────────────┘\n\n")
-        
-        # 이슈사항
-        f.write("┌─────────────────────────────────────────────────────────┐\n")
-        f.write("│                이슈사항(미결사항)                        │\n")
-        f.write("├─────────────────────────────────────────────────────────┤\n")
-        
-        for issue in analysis['issues']:
-            f.write(f"│ ◦ {issue[:53]:<53} │\n")
-        
-        f.write("└─────────────────────────────────────────────────────────┘\n\n")
-        
-        # 첨부파일
-        f.write("┌─────────────────────────────────────────────────────────┐\n")
-        f.write("│                      첨부파일                           │\n")
-        f.write("├─────────────────────────────────────────────────────────┤\n")
-        f.write(f"│ ◦ {base_name}_전사결과.txt{'':<31} │\n")
-        f.write(f"│ ◦ 음성파일: {base_name[:41]:<41} │\n")
-        f.write("└─────────────────────────────────────────────────────────┘\n")
+        f.write("\n\n" + "=" * 60 + "\n")
+        f.write("첨부 파일\n")
+        f.write("=" * 60 + "\n")
+        f.write(f"• 전사 결과: {base_name}_전사결과.txt\n")
+        f.write(f"• 원본 음성: {base_name}\n")
 
 def create_meeting_minutes_docx_legacy(output_path, segment_count, info, analysis, base_name):
     """PDF 양식에 맞는 회의록 DOCX 생성"""

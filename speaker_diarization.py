@@ -6,7 +6,63 @@ pyannote.audio를 사용한 실제 음성 특성 기반 화자 구분
 
 import os
 import warnings
+import tempfile
+import soundfile as sf
+import os
+
+# 모든 경고 메시지 억제
 warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# SpeechBrain 경고 메시지 억제
+os.environ['SPEECHBRAIN_CACHE'] = '/tmp/speechbrain_cache'
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+
+def convert_audio_to_wav(audio_file):
+    """
+    오디오 파일을 WAV 형식으로 변환 (pyannote.audio 호환성을 위해)
+    
+    Args:
+        audio_file (str): 원본 오디오 파일 경로
+    
+    Returns:
+        str: 변환된 WAV 파일 경로 (임시 파일)
+    """
+    try:
+        import librosa
+        
+        # M4A, MP3 등을 WAV로 변환이 필요한지 확인
+        file_ext = os.path.splitext(audio_file)[1].lower()
+        
+        # WAV 파일이면 그대로 반환
+        if file_ext == '.wav':
+            return audio_file, False
+        
+        print(f"🔄 {file_ext} 파일을 WAV로 변환 중...")
+        
+        # librosa로 오디오 읽기 (다양한 형식 지원)
+        audio_data, sample_rate = librosa.load(audio_file, sr=None, mono=False)
+        
+        # 스테레오인 경우 채널 차원 조정
+        if audio_data.ndim > 1:
+            audio_data = audio_data.T
+        
+        # 임시 WAV 파일 생성
+        temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        temp_wav_path = temp_wav.name
+        temp_wav.close()
+        
+        # WAV 파일로 저장
+        sf.write(temp_wav_path, audio_data, sample_rate)
+        
+        print(f"✅ 변환 완료: {temp_wav_path}")
+        return temp_wav_path, True
+        
+    except Exception as e:
+        print(f"❌ 오디오 변환 실패: {e}")
+        return audio_file, False
+
 
 def perform_speaker_diarization(audio_file, num_speakers=None):
     """
@@ -19,14 +75,35 @@ def perform_speaker_diarization(audio_file, num_speakers=None):
     Returns:
         dict: 화자별 시간 구간 정보
     """
+    converted_wav_path = None
     try:
         from pyannote.audio import Pipeline
         import torch
         
         print("🎭 실제 음성 특성 기반 화자 분리 시작...")
         
-        # GPU 사용 가능한지 확인
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # 필요시 오디오 파일을 WAV로 변환
+        working_audio_file, is_converted = convert_audio_to_wav(audio_file)
+        if is_converted:
+            converted_wav_path = working_audio_file
+        
+        # GPU 사용 가능한지 확인 (멀티 GPU 환경 최적화)
+        device = "cpu"
+        gpu_device_id = 1  # GPU 1을 화자분리 전용으로 사용
+        
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            if gpu_count >= 2:
+                device = f"cuda:{gpu_device_id}"
+                print(f"🎯 멀티 GPU 최적화: GPU {gpu_device_id} 사용 (화자분리 전용)")
+            elif gpu_count == 1:
+                device = "cuda:0"
+                print(f"🔧 단일 GPU: GPU 0 사용")
+            else:
+                print(f"🔧 GPU 없음: CPU 사용")
+        else:
+            print(f"🔧 CUDA 불가능: CPU 사용")
+        
         print(f"🔧 화자 분리 디바이스: {device}")
         
         # pyannote 파이프라인 로드
@@ -35,15 +112,23 @@ def perform_speaker_diarization(audio_file, num_speakers=None):
         # Hugging Face 토큰 설정 (여러 방법 지원)
         hf_token = None
         
-        # 1. 환경 변수에서 토큰 가져오기
+        # 1. .env 파일에서 토큰 가져오기
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
+        
+        # 2. 환경 변수에서 토큰 가져오기
         hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
         
-        # 2. 토큰이 없으면 사용자에게 안내
+        # 3. 토큰이 없으면 사용자에게 안내
         if not hf_token:
             print("⚠️ Hugging Face 토큰이 설정되지 않았습니다.")
             print("💡 설정 방법:")
-            print("   export HF_TOKEN='your_token_here'")
-            print("   또는 huggingface-cli login")
+            print("   1. .env 파일에 HF_TOKEN='your_token_here' 추가")
+            print("   2. export HF_TOKEN='your_token_here'")
+            print("   3. huggingface-cli login")
             return None
         
         try:
@@ -61,8 +146,8 @@ def perform_speaker_diarization(audio_file, num_speakers=None):
             else:
                 raise
         
-        if device == "cuda":
-            pipeline = pipeline.to(torch.device("cuda"))
+        if device.startswith("cuda"):
+            pipeline = pipeline.to(torch.device(device))
         
         # 화자 분리 실행
         print(f"🎯 화자 분리 실행 중... (예상 화자 수: {num_speakers or '자동감지'})")
@@ -71,13 +156,22 @@ def perform_speaker_diarization(audio_file, num_speakers=None):
         if num_speakers:
             diarization_params["num_speakers"] = num_speakers
         
-        diarization = pipeline(audio_file, **diarization_params)
+        diarization = pipeline(working_audio_file, **diarization_params)
         
         # 결과 처리
         speaker_segments = {}
         
+        # 화자명 매핑을 위한 딕셔너리
+        speaker_mapping = {}
+        speaker_counter = 1
+        
         for turn, _, speaker in diarization.itertracks(yield_label=True):
-            speaker_id = f"화자{speaker.split('_')[-1] if '_' in speaker else speaker}"
+            # 원본 화자명을 일관된 화자명으로 매핑
+            if speaker not in speaker_mapping:
+                speaker_mapping[speaker] = f"화자{speaker_counter}"
+                speaker_counter += 1
+            
+            speaker_id = speaker_mapping[speaker]
             
             if speaker_id not in speaker_segments:
                 speaker_segments[speaker_id] = []
@@ -95,6 +189,11 @@ def perform_speaker_diarization(audio_file, num_speakers=None):
             total_time = sum(seg['duration'] for seg in segments)
             print(f"   📊 {speaker}: {len(segments)}개 구간, 총 {total_time:.1f}초")
         
+        # 임시 파일 정리
+        if converted_wav_path and os.path.exists(converted_wav_path):
+            os.unlink(converted_wav_path)
+            print("🧹 임시 WAV 파일 정리 완료")
+        
         return speaker_segments
         
     except ImportError:
@@ -109,6 +208,14 @@ def perform_speaker_diarization(audio_file, num_speakers=None):
             print("   1. https://huggingface.co/settings/tokens 에서 토큰 생성")
             print("   2. huggingface-cli login 실행")
         return None
+    finally:
+        # 임시 파일 정리 (예외 발생시에도)
+        if converted_wav_path and os.path.exists(converted_wav_path):
+            try:
+                os.unlink(converted_wav_path)
+                print("🧹 임시 WAV 파일 정리 완료")
+            except:
+                pass
 
 
 def apply_speaker_diarization_to_transcription(segments_list, speaker_segments):

@@ -134,10 +134,11 @@ for segment in segments:
 ```
 
 #### AI 회의록 생성
+
+**방법 1: Ollama 사용 (기본)**
 ```python
 import requests
 
-# Ollama API 호출
 def generate_meeting_minutes(transcription_text):
     response = requests.post("http://localhost:11434/api/generate", json={
         "model": "qwen3:8b",
@@ -145,6 +146,45 @@ def generate_meeting_minutes(transcription_text):
         "stream": False
     })
     return response.json()["response"]
+```
+
+**방법 2: vLLM 사용 (더 빠른 처리, 선택사항)**
+
+⚠️ **주의**: vLLM은 PyTorch 버전 충돌로 인해 현재 uv 환경에서 직접 설치할 수 없습니다.
+
+**대안 1: 별도 conda 환경 사용**
+```bash
+# 새로운 conda 환경 생성
+conda create -n vllm-env python=3.10
+conda activate vllm-env
+
+# vLLM 설치
+pip install vllm
+
+# vLLM 서버 실행  
+vllm serve Qwen/Qwen3-8B --host 0.0.0.0 --port 8000
+
+# 메인 터미널에서 (uv 환경)
+uv run python app.py  # 자동으로 vLLM 감지 및 사용
+```
+
+**대안 2: Docker 사용**
+```bash
+# vLLM Docker 실행
+docker run --gpus all \
+    -p 8000:8000 \
+    vllm/vllm-openai:latest \
+    --model Qwen/Qwen3-8B \
+    --host 0.0.0.0 --port 8000
+
+# 애플리케이션 실행
+uv run python app.py
+```
+
+**대안 3: Ollama만 사용 (현재 권장)**
+```bash
+# 타임아웃 증가로 안정성 확보 (5분)
+uv run python app.py
 ```
 
 ## 🛠 개발 및 테스트
