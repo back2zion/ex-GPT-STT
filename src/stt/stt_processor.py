@@ -14,7 +14,7 @@ import traceback
 
 # 기존 모듈들 임포트
 try:
-    from app import (
+    from src.stt.app import (
         complete_transcription_and_minutes, 
         post_process_stt, 
         build_correction_dictionary,

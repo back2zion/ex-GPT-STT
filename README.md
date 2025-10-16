@@ -73,7 +73,7 @@ ollama pull qwen3:8b
 
 #### 1. GUI 애플리케이션 (권장)
 ```bash
-uv run python app.py
+uv run python src/stt/app.py
 ```
 - 드래그 앤 드롭으로 오디오 파일 추가
 - 자동 STT 처리, 회의록 생성, 이메일 발송
@@ -81,15 +81,15 @@ uv run python app.py
 #### 2. API 서버 실행
 ```bash
 # API 서버 시작
-uv run python api_server.py
+uv run python src/api/api_server.py
 
 # 또는 스크립트 사용
-./start_api_server.sh
+./scripts/start_api_server.sh
 ```
 
 #### 3. 명령행 STT 변환
 ```bash
-uv run python stt_simple.py audio_file.wav
+uv run python src/stt/stt_simple.py audio_file.wav
 ```
 
 #### 4. 웹 대시보드 접속
@@ -171,10 +171,10 @@ def generate_meeting_minutes(transcription_text):
 #### 1. Gmail SMTP 설정 (권장)
 ```bash
 # 이메일 환경 설정
-uv run python setup_email_env.py
+uv run python src/email/setup_email_env.py
 
 # Gmail 앱 비밀번호 설정
-uv run python setup_gmail_smtp.py
+uv run python src/email/setup_gmail_smtp.py
 ```
 
 #### 2. 환경 변수 설정 (.env 파일)

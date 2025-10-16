@@ -16,7 +16,7 @@ os.environ.setdefault('GPU_ONLY', '1')  # GPU 전용 모드 기본값
 
 # 이메일 기능 임포트
 try:
-    from email_utils import send_meeting_minutes_email, setup_email_config
+    from src.email.email_utils import send_meeting_minutes_email, setup_email_config
     EMAIL_AVAILABLE = True
 except ImportError:
     print("⚠️ 이메일 기능을 사용하려면 email_utils.py가 필요합니다.")
@@ -1102,7 +1102,7 @@ def complete_transcription_and_minutes():
         else:
             print("🎭 화자 분리 시작...")
             try:
-                from speaker_diarization import perform_speaker_diarization, apply_speaker_diarization_to_transcription, simple_time_based_diarization
+                from src.utils.speaker_diarization import perform_speaker_diarization, apply_speaker_diarization_to_transcription, simple_time_based_diarization
                 
                 # 실제 화자 분리 시도
                 speaker_segments = perform_speaker_diarization(audio_file, num_speakers=None)
@@ -1118,7 +1118,7 @@ def complete_transcription_and_minutes():
             
             except ImportError:
                 # pyannote.audio 없으면 시간 기반 사용
-                from speaker_diarization import simple_time_based_diarization
+                from src.utils.speaker_diarization import simple_time_based_diarization
                 segments_list = simple_time_based_diarization(segments_list, gap_threshold=5.0, max_speakers=4)
                 print("✅ 시간 기반 화자 구분 적용 완료 (pyannote.audio 미설치)")
         
@@ -2558,7 +2558,7 @@ def transcribe_audio_for_api(audio_file_path, progress_callback=None):
             progress_callback("🎭 화자 분리 처리 중...")
         
         try:
-            from speaker_diarization import perform_speaker_diarization, apply_speaker_diarization_to_transcription, simple_time_based_diarization
+            from src.utils.speaker_diarization import perform_speaker_diarization, apply_speaker_diarization_to_transcription, simple_time_based_diarization
             
             speaker_segments = perform_speaker_diarization(audio_file_path, num_speakers=None)
             

@@ -109,4 +109,4 @@ else
 fi
 
 # API 서버 실행
-exec uv run python api_server.py
+exec uv run python src/api/api_server.py

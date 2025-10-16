@@ -22,7 +22,7 @@ from pathlib import Path
 
 # 환경변수 로드
 try:
-    from load_env import load_env_variables
+    from src.utils.load_env import load_env_variables
     load_env_variables()
 except ImportError:
     print("⚠️ load_env 모듈을 찾을 수 없습니다.")
@@ -30,8 +30,8 @@ except ImportError:
 # 로컬 모듈 임포트
 try:
     # app.py에서 필요한 함수들 직접 import
-    from app import transcribe_audio_for_api, analyze_meeting_with_ai, analyze_with_ollama
-    from email_utils import send_meeting_minutes_email, extract_sender_from_filename, get_sender_email_from_name
+    from src.stt.app import transcribe_audio_for_api, analyze_meeting_with_ai, analyze_with_ollama
+    from src.email.email_utils import send_meeting_minutes_email, extract_sender_from_filename, get_sender_email_from_name
     STT_AVAILABLE = True
     print("✅ app.py 메인 함수들을 성공적으로 import")
 except ImportError as e:
@@ -105,7 +105,7 @@ async def root():
 @app.get("/admin")
 async def admin_dashboard():
     """관리자 대시보드 페이지"""
-    dashboard_path = Path(__file__).parent / "admin_dashboard.html"
+    dashboard_path = Path(__file__).parent.parent.parent / "web" / "admin_dashboard.html"
     if dashboard_path.exists():
         return FileResponse(dashboard_path, media_type="text/html")
     else:
