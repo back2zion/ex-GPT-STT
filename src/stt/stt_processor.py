@@ -5,8 +5,14 @@ STT 처리 모듈 (API 서버용)
 기존 app.py의 STT 처리 로직을 API에서 사용할 수 있도록 분리
 """
 
-import os
 import sys
+from pathlib import Path
+
+# 프로젝트 루트를 Python 경로에 추가
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+import os
 from datetime import datetime
 import tempfile
 from pathlib import Path
