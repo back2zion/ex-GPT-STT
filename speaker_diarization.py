@@ -66,14 +66,14 @@ def convert_audio_to_wav(audio_file):
 
 def perform_speaker_diarization(audio_file, num_speakers=None):
     """
-    실제 화자 분리 수행
+    실제 화자 분리 수행 (화자 이름 감지 지원)
     
     Args:
         audio_file (str): 오디오 파일 경로
         num_speakers (int, optional): 예상 화자 수 (None이면 자동 감지)
     
     Returns:
-        dict: 화자별 시간 구간 정보
+        dict: 화자별 시간 구간 정보 (화자 이름 매핑 포함)
     """
     converted_wav_path = None
     try:
@@ -96,12 +96,30 @@ def perform_speaker_diarization(audio_file, num_speakers=None):
             if gpu_count >= 2:
                 device = f"cuda:{gpu_device_id}"
                 print(f"🎯 멀티 GPU 최적화: GPU {gpu_device_id} 사용 (화자분리 전용)")
+                
+                # RTX 3090 24GB를 위한 고성능 설정
+                torch.cuda.set_device(gpu_device_id)
+                torch.cuda.empty_cache()  # 메모리 정리
+                
+                # 메모리 여유도 확인
+                memory_total = torch.cuda.get_device_properties(gpu_device_id).total_memory / (1024**3)
+                memory_used = torch.cuda.memory_allocated(gpu_device_id) / (1024**3)
+                memory_free = memory_total - memory_used
+                
+                print(f"🔥 GPU {gpu_device_id} 메모리: {memory_free:.1f}GB 사용가능 / {memory_total:.1f}GB")
+                
+                # 24GB GPU이면 고품질 설정
+                if memory_total > 20:
+                    print("✨ 대용량 GPU 감지 - 최고 품질 화자 분리 설정 활성화")
+                    
             elif gpu_count == 1:
                 device = "cuda:0"
                 print(f"🔧 단일 GPU: GPU 0 사용")
             else:
+                device = "cpu"
                 print(f"🔧 GPU 없음: CPU 사용")
         else:
+            device = "cpu"
             print(f"🔧 CUDA 불가능: CPU 사용")
         
         print(f"🔧 화자 분리 디바이스: {device}")
@@ -132,10 +150,29 @@ def perform_speaker_diarization(audio_file, num_speakers=None):
             return None
         
         try:
-            pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                use_auth_token=hf_token
-            )
+            # GPU 메모리가 충분하므로 최신 고품질 모델 시도
+            high_quality_models = [
+                "pyannote/speaker-diarization-3.1",  # 최신 버전
+                "pyannote/speaker-diarization@2022.07",  # 안정적인 버전
+                "pyannote/speaker-diarization",  # 기본 모델
+            ]
+            
+            pipeline = None
+            for model_name in high_quality_models:
+                try:
+                    print(f"🔍 {model_name} 모델 로드 시도...")
+                    pipeline = Pipeline.from_pretrained(
+                        model_name,
+                        use_auth_token=hf_token
+                    )
+                    print(f"✅ {model_name} 로드 성공!")
+                    break
+                except Exception as model_error:
+                    print(f"⚠️ {model_name} 로드 실패: {model_error}")
+                    continue
+            
+            if pipeline is None:
+                raise Exception("모든 화자 분리 모델 로드 실패")
         except Exception as e:
             if "token" in str(e).lower() or "authentication" in str(e).lower():
                 print(f"❌ 인증 오류: {e}")

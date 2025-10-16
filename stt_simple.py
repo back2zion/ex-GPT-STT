@@ -8,6 +8,37 @@ import tempfile
 import zipfile
 import shutil
 import requests
+import psutil
+
+# CPU 사용량 제한 설정
+def limit_cpu_usage():
+    """CPU 사용량을 안전한 수준으로 제한"""
+    try:
+        # 현재 프로세스의 우선순위를 낮춤 (더 많은 CPU를 다른 프로세스에게 양보)
+        current_process = psutil.Process()
+        
+        # Windows에서는 BELOW_NORMAL_PRIORITY_CLASS, Linux에서는 낮은 우선순위
+        if hasattr(psutil, 'BELOW_NORMAL_PRIORITY_CLASS'):
+            current_process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        else:
+            current_process.nice(5)  # Linux에서 낮은 우선순위
+        
+        # CPU 스레드 제한 환경 변수 설정
+        cpu_count = psutil.cpu_count(logical=False)  # 물리적 코어 수
+        limited_threads = max(1, cpu_count // 2)  # 물리적 코어의 절반만 사용
+        
+        os.environ['OMP_NUM_THREADS'] = str(limited_threads)
+        os.environ['MKL_NUM_THREADS'] = str(limited_threads)
+        os.environ['NUMEXPR_NUM_THREADS'] = str(limited_threads)
+        os.environ['OPENBLAS_NUM_THREADS'] = str(limited_threads)
+        
+        print(f"🔧 CPU 사용량 제한 설정됨: {limited_threads}개 스레드 (전체 {cpu_count}코어 중)")
+        
+    except Exception as e:
+        print(f"⚠️ CPU 사용량 제한 설정 실패: {e}")
+
+# 시작 시 CPU 제한 적용
+limit_cpu_usage()
 
 def transcribe_audio(audio_file):
     """간단한 STT 실행"""
@@ -16,14 +47,29 @@ def transcribe_audio(audio_file):
         return
     
     print(f"🎤 파일: {os.path.basename(audio_file)}")
-    print("🔄 Large-v3 모델로 전사 중...")
+    print("🔄 Large-v3 모델로 전사 중... (GPU 사용)")
     
-    # Large 모델로 최고 품질
-    model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+    # Large 모델로 최고 품질 - GPU 강제
+    # 기본: cuda (GPU 0), 메모리 여유에 따라 float16 권장
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            print("❌ CUDA 사용 불가 - GPU가 필요합니다.")
+            return
+    except Exception:
+        pass
+
+    # CPU 스레드를 1개로 제한하여 CPU 사용량 최소화
+    model = WhisperModel(
+        "large-v3", 
+        device="cuda", 
+        compute_type="float16",
+        cpu_threads=1  # CPU 스레드 최소화
+    )
     
     segments, info = model.transcribe(
         audio_file,
-        beam_size=5,
+        beam_size=3,  # 빔 사이즈 줄임 (5→3)
         language="ko",
         vad_filter=True,
         vad_parameters=dict(min_silence_duration_ms=500),
@@ -31,7 +77,9 @@ def transcribe_audio(audio_file):
         compression_ratio_threshold=2.4,
         no_speech_threshold=0.6,
         condition_on_previous_text=False,
-        initial_prompt="한국어 회의 내용입니다."
+        initial_prompt="한국어 회의 내용입니다.",
+        # 배치 처리로 메모리 효율성 향상
+        chunk_length=30  # 30초씩 청크로 나누어 처리
     )
     
     # 결과 저장
@@ -60,10 +108,8 @@ def transcribe_audio(audio_file):
     print(f"\n✅ 완료! 파일 저장됨: {output_file}")
     print(f"📊 총 {segment_count}개 구간, {info.duration:.1f}초")
     
-    # 회의록 생성 여부 확인
-    make_minutes = input("\n회의록(DOCX)도 생성하시겠습니까? (y/N): ").strip().lower()
-    if make_minutes in ['y', 'yes']:
-        create_meeting_minutes(output_file, segments, info)
+    # API 모드에서는 자동으로 회의록 생성
+    create_meeting_minutes(output_file, segments, info)
 
 def create_meeting_minutes(stt_file, segments, info):
     """STT 결과로부터 DOCX 회의록 생성"""
@@ -108,7 +154,7 @@ def create_meeting_minutes(stt_file, segments, info):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 def analyze_with_ai(meeting_text):
-    """AI로 회의 내용 분석"""
+    """vLLM API로 회의 내용 분석"""
     prompt = f"""다음 회의 전사 내용을 분석해서 회의록을 작성해주세요.
 
 전사 내용: {meeting_text}
@@ -122,15 +168,16 @@ def analyze_with_ai(meeting_text):
 
 한국어로 구체적이고 명확하게 작성해주세요."""
 
+    # vLLM OpenAI 호환 API 사용
     response = requests.post(
-        "http://localhost:11434/api/generate",
+        "http://localhost:8000/v1/chat/completions",
         json={
-            "model": "qwen2.5:32b",
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.3}
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1024,
+            "temperature": 0.1,
+            "top_p": 0.7
         },
-        timeout=60
+        timeout=120
     )
     
     if response.status_code == 200:
@@ -138,7 +185,7 @@ def analyze_with_ai(meeting_text):
         ai_response = result.get('response', '')
         return parse_ai_response(ai_response)
     else:
-        raise Exception(f"AI 서버 오류: {response.status_code}")
+        raise Exception(f"vLLM 서버 오류: {response.status_code} - {response.text}")
 
 def parse_ai_response(ai_response):
     """AI 응답 파싱"""

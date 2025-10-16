@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>한국도로공사 모바일 오피스 STT 관리 대시보드</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f6fa;
+            color: #2f3542;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1.5rem 2rem;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .header h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            margin-top: 0.5rem;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+            border: 1px solid #e1e5e9;
+            transition: transform 0.2s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-2px);
+        }
+        
+        .stat-card h3 {
+            color: #57606f;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+        }
+        
+        .stat-card .number {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+        
+        .stat-card .label {
+            color: #747d8c;
+            font-size: 0.9rem;
+        }
+        
+        .success { color: #2ed573; }
+        .warning { color: #ffa502; }
+        .info { color: #3742fa; }
+        .danger { color: #ff3838; }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 20px rgba(0,0,0,0.08);
+            border: 1px solid #e1e5e9;
+            overflow: hidden;
+        }
+        
+        .card-header {
+            padding: 1.5rem 2rem;
+            border-bottom: 1px solid #e1e5e9;
+            background: #f8f9fa;
+        }
+        
+        .card-header h2 {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #2f3542;
+        }
+        
+        .card-body {
+            padding: 2rem;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+        
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        
+        .control-group label {
+            font-size: 0.9rem;
+            color: #57606f;
+            font-weight: 500;
+        }
+        
+        .control-group select,
+        .control-group input {
+            padding: 0.75rem 1rem;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            background: white;
+        }
+        
+        .btn {
+            padding: 0.75rem 1.5rem;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.2s ease;
+        }
+        
+        .btn:hover {
+            background: #5a6fd8;
+        }
+        
+        .btn-refresh {
+            background: #2ed573;
+        }
+        
+        .btn-refresh:hover {
+            background: #26c963;
+        }
+        
+        .task-list {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        
+        .task-item {
+            padding: 1.5rem;
+            border-bottom: 1px solid #e1e5e9;
+            transition: background-color 0.2s ease;
+        }
+        
+        .task-item:hover {
+            background: #f8f9fa;
+        }
+        
+        .task-item:last-child {
+            border-bottom: none;
+        }
+        
+        .task-header {
+            display: flex;
+            justify-content: between;
+            align-items: center;
+            margin-bottom: 0.75rem;
+        }
+        
+        .task-title {
+            font-weight: 600;
+            color: #2f3542;
+            margin-bottom: 0.25rem;
+        }
+        
+        .task-meta {
+            display: flex;
+            gap: 1rem;
+            font-size: 0.85rem;
+            color: #747d8c;
+            margin-bottom: 0.5rem;
+        }
+        
+        .task-details {
+            font-size: 0.9rem;
+            color: #57606f;
+            line-height: 1.5;
+        }
+        
+        .status-badge {
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .status-completed { background: #d1f2eb; color: #27ae60; }
+        .status-processing { background: #fff3cd; color: #f39c12; }
+        .status-failed { background: #f8d7da; color: #e74c3c; }
+        .status-queued { background: #cce5ff; color: #3498db; }
+        
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+            color: #747d8c;
+        }
+        
+        .loading:after {
+            content: "";
+            width: 20px;
+            height: 20px;
+            margin-left: 10px;
+            border: 2px solid #ddd;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 300px;
+            margin-bottom: 1rem;
+        }
+        
+        .no-data {
+            text-align: center;
+            padding: 3rem;
+            color: #747d8c;
+        }
+        
+        .task-id {
+            font-family: 'Courier New', monospace;
+            background: #f1f3f4;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+        
+        .email-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            font-size: 0.8rem;
+        }
+        
+        .email-sent { color: #27ae60; }
+        .email-not-sent { color: #e74c3c; }
+        
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            }
+            
+            .container {
+                padding: 1rem;
+            }
+            
+            .controls {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎤 모바일 오피스 STT 관리 대시보드</h1>
+        <p>한국도로공사 음성인식 시스템 실시간 모니터링</p>
+    </div>
+
+    <div class="container">
+        <!-- 통계 카드들 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>전체 작업</h3>
+                <div class="number info" id="totalTasks">-</div>
+                <div class="label">총 처리된 작업</div>
+            </div>
+            <div class="stat-card">
+                <h3>성공률</h3>
+                <div class="number success" id="successRate">-%</div>
+                <div class="label">완료된 작업 비율</div>
+            </div>
+            <div class="stat-card">
+                <h3>처리 중</h3>
+                <div class="number warning" id="processingTasks">-</div>
+                <div class="label">현재 처리 중인 작업</div>
+            </div>
+            <div class="stat-card">
+                <h3>실패</h3>
+                <div class="number danger" id="failedTasks">-</div>
+                <div class="label">처리 실패한 작업</div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <!-- 최근 작업 목록 -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>📋 최근 작업 목록</h2>
+                </div>
+                <div class="card-body">
+                    <div class="controls">
+                        <div class="control-group">
+                            <label>상태 필터</label>
+                            <select id="statusFilter">
+                                <option value="">모든 상태</option>
+                                <option value="completed">완료</option>
+                                <option value="processing">처리중</option>
+                                <option value="queued">대기중</option>
+                                <option value="failed">실패</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label>부서 필터</label>
+                            <select id="departmentFilter">
+                                <option value="">모든 부서</option>
+                            </select>
+                        </div>
+                        <div class="control-group">
+                            <label>발신자 검색</label>
+                            <input type="text" id="senderSearch" placeholder="발신자 이름">
+                        </div>
+                        <div class="control-group">
+                            <label>&nbsp;</label>
+                            <button class="btn" onclick="applyFilters()">필터 적용</button>
+                        </div>
+                        <div class="control-group">
+                            <label>&nbsp;</label>
+                            <button class="btn btn-refresh" onclick="refreshData()">🔄 새로고침</button>
+                        </div>
+                    </div>
+                    
+                    <div id="taskList" class="task-list">
+                        <div class="loading">데이터를 불러오는 중...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 통계 차트 -->
+            <div class="card">
+                <div class="card-header">
+                    <h2>📊 부서별 사용 통계</h2>
+                </div>
+                <div class="card-body">
+                    <div class="chart-container">
+                        <canvas id="departmentChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 최근 24시간 활동 -->
+        <div class="card">
+            <div class="card-header">
+                <h2>⏰ 최근 24시간 활동</h2>
+            </div>
+            <div class="card-body">
+                <div id="recentActivity" class="task-list" style="max-height: 300px;">
+                    <div class="loading">데이터를 불러오는 중...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let dashboardData = {};
+        let departmentChart = null;
+        const API_BASE = window.location.protocol + '//' + window.location.hostname + ':8080';
+
+        // 페이지 로드 시 초기화
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshData();
+            // 30초마다 자동 새로고침
+            setInterval(refreshData, 30000);
+        });
+
+        // 데이터 새로고침
+        async function refreshData() {
+            try {
+                await Promise.all([
+                    loadDashboardData(),
+                    loadDetailedTasks()
+                ]);
+            } catch (error) {
+                console.error('데이터 로드 실패:', error);
+                showError('데이터를 불러오는데 실패했습니다. API 서버가 실행 중인지 확인하세요.');
+            }
+        }
+
+        // 대시보드 데이터 로드
+        async function loadDashboardData() {
+            const response = await fetch(`${API_BASE}/api/v1/admin/dashboard`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            
+            dashboardData = await response.json();
+            updateDashboardStats();
+            updateDepartmentChart();
+            updateRecentActivity();
+        }
+
+        // 대시보드 통계 업데이트
+        function updateDashboardStats() {
+            document.getElementById('totalTasks').textContent = dashboardData.total_tasks || 0;
+            document.getElementById('successRate').textContent = (dashboardData.success_rate || 0) + '%';
+            document.getElementById('processingTasks').textContent = 
+                (dashboardData.status_counts?.processing || 0) + (dashboardData.status_counts?.queued || 0);
+            document.getElementById('failedTasks').textContent = dashboardData.status_counts?.failed || 0;
+        }
+
+        // 부서별 차트 업데이트
+        function updateDepartmentChart() {
+            const ctx = document.getElementById('departmentChart').getContext('2d');
+            
+            if (departmentChart) {
+                departmentChart.destroy();
+            }
+
+            const departments = dashboardData.department_stats || {};
+            const labels = Object.keys(departments);
+            const data = Object.values(departments);
+
+            if (labels.length === 0) {
+                return;
+            }
+
+            departmentChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: data,
+                        backgroundColor: [
+                            '#667eea', '#764ba2', '#f093fb', '#f5576c',
+                            '#4facfe', '#00f2fe', '#43e97b', '#38f9d7',
+                            '#ffecd2', '#fcb69f', '#a8edea', '#fed6e3'
+                        ]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+
+            // 부서 필터 옵션 업데이트
+            const departmentFilter = document.getElementById('departmentFilter');
+            departmentFilter.innerHTML = '<option value="">모든 부서</option>';
+            labels.forEach(dept => {
+                const option = document.createElement('option');
+                option.value = dept;
+                option.textContent = dept;
+                departmentFilter.appendChild(option);
+            });
+        }
+
+        // 최근 24시간 활동 업데이트
+        function updateRecentActivity() {
+            const container = document.getElementById('recentActivity');
+            const recent24h = dashboardData.recent_24h_tasks || [];
+            
+            if (recent24h.length === 0) {
+                container.innerHTML = '<div class="no-data">최근 24시간 내 활동이 없습니다.</div>';
+                return;
+            }
+
+            container.innerHTML = recent24h.map(task => `
+                <div class="task-item">
+                    <div class="task-header">
+                        <div class="task-title">${task.meeting_title || '제목 없음'}</div>
+                        <span class="status-badge status-${task.status}">${getStatusText(task.status)}</span>
+                    </div>
+                    <div class="task-meta">
+                        <span>👤 ${task.sender_name || '발신자 미상'}</span>
+                        <span>🏢 ${task.department || '부서 미상'}</span>
+                        <span>⏰ ${formatTime(task.created_at)}</span>
+                        ${task.duration ? `<span>⏱️ ${Math.round(task.duration)}초</span>` : ''}
+                    </div>
+                    <div class="email-status ${task.email_sent ? 'email-sent' : 'email-not-sent'}">
+                        ${task.email_sent ? '📧 이메일 발송됨' : '📧 이메일 미발송'}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // 상세 작업 목록 로드
+        async function loadDetailedTasks() {
+            const statusFilter = document.getElementById('statusFilter').value;
+            const departmentFilter = document.getElementById('departmentFilter').value;
+            const senderSearch = document.getElementById('senderSearch').value;
+
+            let url = `${API_BASE}/api/v1/admin/tasks/detailed?limit=50`;
+            if (statusFilter) url += `&status=${statusFilter}`;
+            if (departmentFilter) url += `&department=${encodeURIComponent(departmentFilter)}`;
+            if (senderSearch) url += `&sender=${encodeURIComponent(senderSearch)}`;
+
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            updateTaskList(data.tasks);
+        }
+
+        // 작업 목록 UI 업데이트
+        function updateTaskList(tasks) {
+            const container = document.getElementById('taskList');
+            
+            if (tasks.length === 0) {
+                container.innerHTML = '<div class="no-data">조건에 맞는 작업이 없습니다.</div>';
+                return;
+            }
+
+            container.innerHTML = tasks.map(task => `
+                <div class="task-item" onclick="showTaskDetails('${task.task_id}')">
+                    <div class="task-header">
+                        <div class="task-title">${task.meeting_title || '제목 없음'}</div>
+                        <span class="status-badge status-${task.status}">${getStatusText(task.status)}</span>
+                    </div>
+                    <div class="task-meta">
+                        <span class="task-id">${task.task_id.substring(0, 8)}...</span>
+                        <span>👤 ${task.sender_name || '발신자 미상'}</span>
+                        <span>🏢 ${task.department || '부서 미상'}</span>
+                        <span>⏰ ${formatTime(task.created_at)}</span>
+                    </div>
+                    <div class="task-details">
+                        ${task.duration ? `⏱️ 음성 길이: ${Math.round(task.duration)}초` : ''}
+                        ${task.transcription_length ? ` | 📝 전사: ${task.transcription_length}자` : ''}
+                        ${task.meeting_minutes_length ? ` | 📋 회의록: ${task.meeting_minutes_length}자` : ''}
+                        <br>
+                        <div class="email-status ${task.email_sent ? 'email-sent' : 'email-not-sent'}">
+                            ${task.email_sent ? '📧 이메일 발송됨' : '📧 이메일 미발송'}
+                        </div>
+                        ${task.error_message ? `<div style="color: #e74c3c; margin-top: 0.5rem;">❌ ${task.error_message}</div>` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // 필터 적용
+        function applyFilters() {
+            loadDetailedTasks();
+        }
+
+        // 작업 상세 정보 표시
+        async function showTaskDetails(taskId) {
+            try {
+                const response = await fetch(`${API_BASE}/api/v1/admin/task/${taskId}/details`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const task = await response.json();
+                
+                // 모달 창이나 새 페이지로 상세 정보 표시
+                // 여기서는 간단히 alert로 표시
+                let details = `작업 상세 정보\n\n`;
+                details += `ID: ${task.task_id}\n`;
+                details += `제목: ${task.meeting_title}\n`;
+                details += `발신자: ${task.sender_name} (${task.sender_email})\n`;
+                details += `부서: ${task.department}\n`;
+                details += `상태: ${getStatusText(task.status)}\n`;
+                details += `생성시간: ${formatTime(task.created_at)}\n`;
+                details += `음성길이: ${task.duration ? Math.round(task.duration) + '초' : '미상'}\n`;
+                details += `이메일발송: ${task.email_sent ? '완료' : '미완료'}\n`;
+                
+                if (task.error_message) {
+                    details += `\n오류: ${task.error_message}`;
+                }
+                
+                alert(details);
+                
+            } catch (error) {
+                console.error('상세 정보 로드 실패:', error);
+                alert('상세 정보를 불러올 수 없습니다.');
+            }
+        }
+
+        // 유틸리티 함수들
+        function getStatusText(status) {
+            const statusMap = {
+                'completed': '완료',
+                'processing': '처리중',
+                'queued': '대기중',
+                'failed': '실패'
+            };
+            return statusMap[status] || status;
+        }
+
+        function formatTime(timeString) {
+            const date = new Date(timeString);
+            const now = new Date();
+            const diff = now - date;
+            
+            if (diff < 60000) { // 1분 미만
+                return '방금 전';
+            } else if (diff < 3600000) { // 1시간 미만
+                return Math.floor(diff / 60000) + '분 전';
+            } else if (diff < 86400000) { // 24시간 미만
+                return Math.floor(diff / 3600000) + '시간 전';
+            } else {
+                return date.toLocaleDateString('ko-KR') + ' ' + date.toLocaleTimeString('ko-KR', {hour: '2-digit', minute: '2-digit'});
+            }
+        }
+
+        function showError(message) {
+            document.getElementById('taskList').innerHTML = `
+                <div class="no-data" style="color: #e74c3c;">
+                    ❌ ${message}
+                </div>
+            `;
+        }
+
+        // Enter 키로 필터 적용
+        document.getElementById('senderSearch').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                applyFilters();
+            }
+        });
+    </script>
+</body>
+</html>

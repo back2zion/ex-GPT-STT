@@ -11,6 +11,25 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 # 환경 변수로 추가 경고 억제
 os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
 os.environ['SPEECHBRAIN_CACHE'] = '/tmp/speechbrain_cache'
+os.environ.setdefault('GPU_ONLY', '1')  # GPU 전용 모드 기본값
+# CPU 사용량 최소화 설정
+
+# 이메일 기능 임포트
+try:
+    from email_utils import send_meeting_minutes_email, setup_email_config
+    EMAIL_AVAILABLE = True
+except ImportError:
+    print("⚠️ 이메일 기능을 사용하려면 email_utils.py가 필요합니다.")
+    EMAIL_AVAILABLE = False
+import psutil
+cpu_count = psutil.cpu_count(logical=False)  # 물리적 코어 수
+limited_threads = max(1, cpu_count // 3)  # 물리적 코어의 1/3만 사용 (더 보수적)
+
+os.environ.setdefault('OMP_NUM_THREADS', str(limited_threads))
+os.environ.setdefault('MKL_NUM_THREADS', str(limited_threads))
+os.environ.setdefault('NUMEXPR_NUM_THREADS', str(limited_threads))
+os.environ.setdefault('OPENBLAS_NUM_THREADS', str(limited_threads))
+os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
 
 from faster_whisper import WhisperModel
 import sys
@@ -80,19 +99,27 @@ def select_file():
     choice = input("\nSelect (1-5): ").strip()
     
     if choice == "2":
-        return browse_directory(download_dir)
+        return browse_directory(download_dir), False, False
     elif choice == "3":
-        return browse_directory(onedrive_dir)
+        return browse_directory(onedrive_dir), False, False
     elif choice == "4":
-        return drag_drop_file_selector()
+        result = drag_drop_file_selector()
+        if isinstance(result, tuple) and len(result) == 3:
+            return result  # 파일 경로, 화자 분리, AI 분석 옵션 튜플 반환
+        elif isinstance(result, tuple) and len(result) == 2:
+            return result[0], result[1], False  # 이전 버전 호환성
+        else:
+            return result, False, False  # 더 이전 버전 호환성
     elif choice == "5":
-        return terminal_drag_drop()
+        return terminal_drag_drop(), False, False
     else:
-        return input_file_path()
+        return input_file_path(), False, False
 
 def drag_drop_file_selector():
     """드래그 앤 드롭 파일 선택 GUI"""
     selected_file = [None]  # 선택된 파일을 저장할 리스트 (mutable)
+    skip_diarization = [False]  # 화자 분리 건너뛰기 옵션
+    skip_ai = [False]  # AI 분석 건너뛰기 옵션
     
     def on_drop(event):
         """파일이 드롭되었을 때 호출되는 함수"""
@@ -157,6 +184,8 @@ def drag_drop_file_selector():
     
     def on_select():
         """선택 버튼을 눌렀을 때"""
+        skip_diarization[0] = skip_diarization_var.get()
+        skip_ai[0] = skip_ai_var.get()
         root.destroy()
     
     def on_cancel():
@@ -193,6 +222,24 @@ def drag_drop_file_selector():
         # 파일 정보 표시 영역
         info_label = ttk.Label(main_frame, text="파일을 선택해주세요")
         info_label.pack(pady=10)
+        
+        # 옵션 프레임
+        option_frame = ttk.Frame(main_frame)
+        option_frame.pack(pady=5)
+        
+        # 화자 분리 건너뛰기 체크박스
+        skip_diarization_var = tk.BooleanVar()
+        skip_checkbox = ttk.Checkbutton(option_frame, 
+                                      text="🚀 화자 분리 건너뛰기 (빠른 처리, 컴퓨터 부하 감소)", 
+                                      variable=skip_diarization_var)
+        skip_checkbox.pack()
+        
+        # AI 분석 건너뛰기 체크박스
+        skip_ai_var = tk.BooleanVar()
+        skip_ai_checkbox = ttk.Checkbutton(option_frame, 
+                                         text="⚡ AI 분석 건너뛰기 (기본 템플릿 회의록, 최대 부하 감소)", 
+                                         variable=skip_ai_var)
+        skip_ai_checkbox.pack()
         
         # 버튼 프레임
         button_frame = ttk.Frame(main_frame)
@@ -241,7 +288,7 @@ def drag_drop_file_selector():
     # GUI 실행
     root.mainloop()
     
-    return selected_file[0]
+    return selected_file[0], skip_diarization[0], skip_ai[0]
 
 def terminal_drag_drop():
     """Terminal drag and drop file selection"""
@@ -375,6 +422,22 @@ def input_file_path():
                 print("프로그램을 종료합니다.")
                 return None
 
+def limit_process_priority():
+    """프로세스 우선순위를 낮춰서 시스템 안정성 향상"""
+    try:
+        current_process = psutil.Process()
+        
+        # Windows와 Linux 모두 지원
+        if hasattr(psutil, 'BELOW_NORMAL_PRIORITY_CLASS'):
+            current_process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        else:
+            current_process.nice(10)  # Linux에서 낮은 우선순위
+        
+        print(f"🔧 프로세스 우선순위 낮춤: {current_process.nice()}")
+        
+    except Exception as e:
+        print(f"⚠️ 프로세스 우선순위 설정 실패: {e}")
+
 def show_system_info():
     """시스템 자원 정보 표시"""
     print("\n💻 시스템 정보")
@@ -466,10 +529,29 @@ def show_resource_usage(process, stage=""):
                 total_gpu_memory = 0
                 total_allocated = 0
                 for i in range(torch.cuda.device_count()):
-                    memory_allocated = torch.cuda.memory_allocated(i) / (1024**3)
+                    # CTranslate2 메모리는 nvidia-smi로 정확히 측정
+                    try:
+                        import subprocess
+                        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', 
+                                               '--format=csv,noheader,nounits', f'--id={i}'], 
+                                               capture_output=True, text=True, timeout=2)
+                        if result.returncode == 0:
+                            used_mb, total_mb = result.stdout.strip().split(', ')
+                            memory_allocated = int(used_mb) / 1024
+                            total_memory = int(total_mb) / 1024
+                            usage_percent = (int(used_mb) / int(total_mb)) * 100 if int(total_mb) > 0 else 0
+                        else:
+                            # fallback
+                            memory_allocated = 0.0
+                            total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                            usage_percent = 0.0
+                    except Exception:
+                        # fallback to torch (부정확하지만 기본값)
+                        memory_allocated = torch.cuda.memory_allocated(i) / (1024**3)
+                        total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                        usage_percent = (memory_allocated / total_memory) * 100 if total_memory > 0 else 0
+                    
                     memory_cached = torch.cuda.memory_reserved(i) / (1024**3)
-                    total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-                    usage_percent = (memory_allocated / total_memory) * 100 if total_memory > 0 else 0
                     
                     # GPU 이름 및 역할 (RTX 3090)
                     gpu_name = torch.cuda.get_device_name(i).replace('NVIDIA GeForce ', '')
@@ -533,9 +615,28 @@ def get_optimal_gpu_device():
         gpu_memory_usage = []
         for i in range(gpu_count):
             try:
-                memory_allocated = torch.cuda.memory_allocated(i) / (1024**3)
-                total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-                usage_percent = (memory_allocated / total_memory) * 100 if total_memory > 0 else 0
+                # CTranslate2 메모리는 nvidia-smi로 정확히 측정
+                try:
+                    import subprocess
+                    result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', 
+                                           '--format=csv,noheader,nounits', f'--id={i}'], 
+                                           capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        used_mb, total_mb = result.stdout.strip().split(', ')
+                        memory_allocated = int(used_mb) / 1024
+                        total_memory = int(total_mb) / 1024
+                        usage_percent = (int(used_mb) / int(total_mb)) * 100 if int(total_mb) > 0 else 0
+                    else:
+                        # fallback
+                        memory_allocated = 0.0
+                        total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                        usage_percent = 0.0
+                except Exception:
+                    # fallback to torch
+                    memory_allocated = torch.cuda.memory_allocated(i) / (1024**3)
+                    total_memory = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                    usage_percent = (memory_allocated / total_memory) * 100 if total_memory > 0 else 0
+                
                 gpu_name = torch.cuda.get_device_name(i)
                 
                 gpu_memory_usage.append({
@@ -575,8 +676,9 @@ def initialize_multi_gpu_whisper_model(model_name="large-v3", preferred_device=N
         import torch
         
         if not torch.cuda.is_available():
-            print("⚠️ CUDA를 사용할 수 없어 CPU 모드로 전환")
-            return initialize_cpu_whisper_model(model_name)
+            print("❌ CUDA를 사용할 수 없습니다!")
+            print("❌ GPU가 필수입니다. 프로그램을 종료합니다.")
+            raise RuntimeError("CUDA가 사용 불가능합니다. GPU가 필요합니다.")
         
         gpu_count = torch.cuda.device_count()
         print(f"🎯 Multi-GPU 초기화: {gpu_count}개 GPU 감지")
@@ -594,8 +696,9 @@ def initialize_multi_gpu_whisper_model(model_name="large-v3", preferred_device=N
         else:
             selected_device, success = get_optimal_gpu_device()
             if not success:
-                print("⚠️ GPU 선택 실패, CPU 모드로 전환")
-                return initialize_cpu_whisper_model(model_name)
+                print("❌ GPU 선택 실패!")
+                print("❌ GPU가 필수입니다. 프로그램을 종료합니다.")
+                raise RuntimeError("GPU 선택에 실패했습니다.")
         
         print(f"🚀 {model_name} 모델을 GPU {selected_device}에 로드 중...")
         
@@ -610,54 +713,108 @@ def initialize_multi_gpu_whisper_model(model_name="large-v3", preferred_device=N
             else:
                 print(f"🎯 GPU에 {model_name} 모델 로드 시도 중...")
             
-            # 안전한 GPU 초기화
-            model = WhisperModel(
-                model_name, 
-                device="cuda",
-                device_index=device_index,
-                compute_type="float16"
-            )
-            print(f"✅ GPU {device_index}에 {model_name} 모델 로드 성공!")
+            # GPU 메모리 정리
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
+            # 강제 GPU 모드 초기화 (CTranslate2 직접 제어)
+            model = None
+            try:
+                # 환경변수로 CUDA 강제
+                os.environ['CUDA_VISIBLE_DEVICES'] = str(device_index)
+                
+                # 첫 번째 시도: float16 (가장 메모리 효율적)
+                print(f"🔄 GPU {device_index}에 {model_name} 로드 시도 중... (float16, 강제 GPU)")
+                model = WhisperModel(
+                    model_name, 
+                    device="cuda",
+                    device_index=device_index,
+                    compute_type="float16",
+                    cpu_threads=1,  # CPU 스레드 최소화
+                    num_workers=1   # 단일 워커로 GPU 집중
+                )
+                
+                # 모델이 실제로 GPU에 로드되었는지 검증
+                if hasattr(model.model, 'device') and model.model.device == "cuda":
+                    print(f"✅ GPU {device_index}에 {model_name} 모델 로드 성공! (float16)")
+                else:
+                    print(f"⚠️ 모델이 CPU로 폴백되었습니다. device: {model.model.device}")
+                    
+            except Exception as e1:
+                print(f"⚠️ float16 시도 실패: {e1}")
+                try:
+                    # 두 번째 시도: int8_float16
+                    print(f"🔄 GPU {device_index}에 {model_name} 로드 시도 중... (int8_float16)")
+                    model = WhisperModel(
+                        model_name, 
+                        device="cuda",
+                        device_index=device_index,
+                        compute_type="int8_float16",
+                        cpu_threads=1,
+                        num_workers=1
+                    )
+                    print(f"✅ GPU {device_index}에 {model_name} 모델 로드 성공! (int8_float16)")
+                except Exception as e2:
+                    print(f"⚠️ int8_float16 시도도 실패: {e2}")
+                    print(f"❌ GPU 로드 실패, CPU 모드는 지원하지 않습니다: {e2}")
+                    raise RuntimeError("GPU 필수: CTranslate2 GPU 로드 실패")
+            
+            # CTranslate2 모델이 GPU를 사용하는지 확인 (nvidia-smi 기반)
+            if model is not None:
+                # nvidia-smi로 실제 GPU 메모리 사용량 확인
+                try:
+                    import subprocess
+                    result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits', f'--id={device_index}'], 
+                                          capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        gpu_memory_used_mb = int(result.stdout.strip())
+                        gpu_memory_used_gb = gpu_memory_used_mb / 1024
+                        print(f"🔥 nvidia-smi GPU {device_index} 메모리 사용: {gpu_memory_used_gb:.1f}GB")
+                        
+                        if gpu_memory_used_gb < 1.0:  # 1GB 미만이면 문제 있음
+                            print(f"⚠️ GPU 메모리 사용량이 너무 적습니다 ({gpu_memory_used_gb:.1f}GB)")
+                            print("⚠️ CTranslate2가 GPU를 제대로 사용하지 못할 수 있습니다.")
+                        else:
+                            print(f"✅ GPU에서 정상적으로 모델이 로드된 것으로 보입니다!")
+                    else:
+                        print("⚠️ nvidia-smi로 GPU 메모리 확인 실패")
+                except Exception as mem_e:
+                    print(f"⚠️ GPU 메모리 확인 오류: {mem_e}")
+                
+                # 모델 설정 정보 출력
+                print(f"📋 모델 정보:")
+                print(f"   - Device: {model.model.device}")
+                print(f"   - Device Index: {model.model.device_index}")
+                print(f"   - Compute Type: {model.model.compute_type}")
+                
+                if model.model.device != "cuda":
+                    print("❌ 모델이 CUDA 디바이스를 사용하지 않습니다!")
+                    raise RuntimeError(f"모델이 CPU로 폴백됨: {model.model.device}")
+                
+                # CUDA 가시성 복원
+                if gpu_count >= 2:
+                    os.environ['CUDA_VISIBLE_DEVICES'] = "0,1"
+            else:
+                raise RuntimeError("모델 로드 실패")
+                
         except Exception as gpu_error:
-            print(f"⚠️ GPU 로드 실패: {str(gpu_error)}")
-            print("🔄 CPU 모드로 전환...")
-            raise gpu_error
+            print(f"❌ GPU 모델 로드 실패: {str(gpu_error)}")
+            print("❌ GPU 모드가 필수입니다. 프로그램을 종료합니다.")
+            raise RuntimeError(f"GPU에서 모델 로드 실패: {str(gpu_error)}")
         
         print(f"✅ {model_name} 모델 GPU {selected_device} 로드 성공!")
-        
-        # GPU 메모리 사용량 확인
-        memory_used = torch.cuda.memory_allocated(selected_device) / (1024**3)
-        memory_total = torch.cuda.get_device_properties(selected_device).total_memory / (1024**3)
-        print(f"🔥 GPU {selected_device} 메모리 사용: {memory_used:.1f}GB / {memory_total:.1f}GB")
         
         return model, selected_device, True
         
     except Exception as e:
-        print(f"⚠️ Multi-GPU 초기화 실패: {str(e)}")
-        print("🔄 CPU 모드로 폴백...")
-        return initialize_cpu_whisper_model(model_name)
+        print(f"❌ Multi-GPU 초기화 실패: {str(e)}")
+        print(f"❌ 상세 에러: {type(e).__name__}")
+        import traceback
+        print(f"❌ 에러 위치: {traceback.format_exc()}")
+        print("❌ GPU 모드가 필수입니다. 프로그램을 종료합니다.")
+        raise RuntimeError(f"Multi-GPU 초기화 실패: {str(e)}")
 
-def initialize_cpu_whisper_model(model_name="large-v3"):
-    """최적화된 CPU WhisperModel 초기화"""
-    print("🖥️ CPU 모드 사용 (Large-v3 모델)")
-    
-    # CPU 코어 수를 고려한 워커 수 설정
-    physical_cores = psutil.cpu_count(logical=False)  # 물리 코어 수
-    if physical_cores is None:
-        physical_cores = 4  # 기본값
-    max_workers = max(1, min(4, physical_cores // 2))  # 물리 코어의 절반만 사용
-    
-    print(f"🔧 {model_name} 모델 로드 중... (워커: {max_workers}개, CPU 제한)")
-    
-    model = WhisperModel(
-        model_name, 
-        device="cpu", 
-        compute_type="int8",
-        num_workers=max_workers
-    )
-    
-    print(f"✅ CPU {model_name} 모델 로드 완료")
-    return model, None, False
+# CPU 모델 초기화 함수 제거 - GPU 전용 모드
 
 def complete_transcription_and_minutes():
     """완전한 STT + 표 형식 회의록 생성"""
@@ -665,48 +822,59 @@ def complete_transcription_and_minutes():
     print("STT & Meeting Minutes Generator")
     print("=" * 60)
     
+    # GPU 전용 모드 설정
+    print("🚀 GPU 전용 모드 초기화")
+    
+    # GPU 필수 확인
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            print("❌ CUDA가 사용 불가능합니다!")
+            print("❌ 이 프로그램은 GPU 전용으로 설계되었습니다.")
+            return
+        
+        gpu_count = torch.cuda.device_count()
+        if gpu_count < 2:
+            print(f"⚠️ GPU {gpu_count}개 감지됨. 최적 성능을 위해서는 2개 이상 권장")
+        else:
+            print(f"✅ Multi-GPU 환경 감지: {gpu_count}개 GPU")
+            
+    except Exception as e:
+        print(f"❌ GPU 환경 확인 실패: {e}")
+        return
+    
     # 시스템 정보 표시
     show_system_info()
     
     # 자원 모니터링 시작
     process = monitor_resources()
     
-    # 터미널에서 바로 드래그 받기
-    print("Drag audio file to terminal:")
+    # 파일 선택
+    file_result = select_file()
+    if isinstance(file_result, tuple) and len(file_result) == 3:
+        audio_file, skip_diarization, skip_ai = file_result
+    elif isinstance(file_result, tuple) and len(file_result) == 2:
+        audio_file, skip_diarization = file_result
+        skip_ai = False
+    else:
+        audio_file = file_result
+        skip_diarization = False
+        skip_ai = False
     
-    while True:
-        try:
-            audio_file = input("File path: ").strip()
-            
-            # 따옴표 제거
-            if audio_file.startswith('"') and audio_file.endswith('"'):
-                audio_file = audio_file[1:-1]
-            elif audio_file.startswith("'") and audio_file.endswith("'"):
-                audio_file = audio_file[1:-1]
-            
-            if not audio_file:
-                print("Please drag a file")
-                continue
-            
-            # Windows → WSL 경로 변환
-            if audio_file.lower().startswith(("c:\\", "c:/")):
-                if "\\" in audio_file:
-                    audio_file = audio_file.replace("C:\\", "/mnt/c/").replace("\\", "/")
-                else:
-                    audio_file = audio_file.replace("C:/", "/mnt/c/").replace("c:/", "/mnt/c/")
-                print(f"Converted: {audio_file}")
-            
-            # 파일 존재 확인
-            if os.path.exists(audio_file):
-                print(f"File found: {os.path.basename(audio_file)}")
-                break
-            else:
-                print(f"File not found: {audio_file}")
-                continue
-                
-        except KeyboardInterrupt:
-            print("\nCancelled")
-            return
+    if not audio_file:
+        print("❌ 파일이 선택되지 않았습니다.")
+        return
+    
+    print(f"선택된 파일: {os.path.basename(audio_file)}")
+    if skip_diarization:
+        print("🚀 화자 분리 건너뛰기 옵션 활성화")
+    if skip_ai:
+        print("⚡ AI 분석 건너뛰기 옵션 활성화")
+    
+    # 파일 존재 확인
+    if not os.path.exists(audio_file):
+        print(f"❌ 파일을 찾을 수 없습니다: {audio_file}")
+        return
     
     # 파일명과 출력 경로 설정
     base_name = os.path.splitext(os.path.basename(audio_file))[0]
@@ -768,22 +936,65 @@ def complete_transcription_and_minutes():
         # Large 모델로 최고 품질 GPU 가속
         gpu_success = False
         
-        # Multi-GPU 최적화 모델 초기화
+        # Multi-GPU 최적화 모델 초기화 (GPU 필수) - 최고 품질 모델
         print("🎯 Multi-GPU 최적화 분석 시작...")
-        model_result = initialize_multi_gpu_whisper_model("large-v3")
-        
-        if len(model_result) == 3:
-            model, selected_gpu, gpu_success = model_result
-        else:
-            model, gpu_success = model_result[0], model_result[2] if len(model_result) > 2 else False
-            selected_gpu = model_result[1] if len(model_result) > 1 else None
+        try:
+            # 한국어 최적화 모델 우선 선택 (높은 정확도)
+            # RTX 3090 24GB x 2 = 48GB 총 메모리로 큰 모델 가능
+            ctranslate2_models = [
+                # CTranslate2 호환 모델들 (faster-whisper에서 직접 지원)
+                "large-v3",                                # Whisper Large v3 (최고품질)
+                "large-v2",                                # Whisper Large v2 (안정적)
+                "distil-large-v3",                        # Distil Large v3 (빠르고 정확)
+                "medium",                                  # Medium 모델 (균형)
+                "small"                                    # Small 모델 (폴백)
+            ]
+            
+            # 실제로 각 모델을 시도해보면서 작동하는 모델 찾기
+            model_name = None
+            for candidate_model in ctranslate2_models:
+                try:
+                    print(f"🔍 {candidate_model} 모델 로드 시도 중...")
+                    # 실제로 모델 로드를 시도
+                    test_model = WhisperModel(
+                        candidate_model, 
+                        device="cuda",
+                        compute_type="float16"
+                    )
+                    print(f"✅ {candidate_model} 로드 성공!")
+                    model_name = candidate_model
+                    # 테스트 성공하면 모델 객체 삭제 (메모리 절약)
+                    del test_model
+                    break
+                except Exception as test_error:
+                    print(f"⚠️ {candidate_model} 로드 실패: {test_error}")
+                    continue
+                    
+            if not model_name:
+                print("❌ 모든 모델 로드 실패")
+                raise RuntimeError("사용 가능한 Whisper 모델이 없습니다.")
+                
+            print(f"🚀 최종 선택된 모델: {model_name}")
+            model_result = initialize_multi_gpu_whisper_model(model_name)
+            
+            if len(model_result) == 3:
+                model, selected_gpu, gpu_success = model_result
+            else:
+                model, gpu_success = model_result[0], model_result[2] if len(model_result) > 2 else False
+                selected_gpu = model_result[1] if len(model_result) > 1 else None
+        except Exception as gpu_init_error:
+            print(f"❌ GPU 초기화 실패: {str(gpu_init_error)}")
+            print("❌ GPU가 필수입니다. 프로그램을 종료합니다.")
+            return
+            
         show_resource_usage(process, "모델 로드 완료")
         
         if gpu_success:
             gpu_name = "RTX 3090" if selected_gpu is not None else "GPU"
             print(f"🎙️ Multi-GPU 가속 전사 시작... (GPU {selected_gpu}: {gpu_name})")
         else:
-            print("🎤 CPU 전사 시작... (Large-v3 모델, 시스템 보호 설정)")
+            print("❌ GPU 사용에 실패했습니다. 프로그램을 종료합니다.")
+            return
         
         # 실시간 진행 상태 표시
         print("📊 전사 진행 중... (세그먼트별로 실시간 표시됩니다)")
@@ -794,14 +1005,19 @@ def complete_transcription_and_minutes():
         
         segments, info = model.transcribe(
             audio_file,
-            beam_size=3,                    # 정확도와 속도 균형 (5→3)
-            language="ko",                  # 한국어 설정
+            beam_size=3,                    # CPU 사용량 최적화: 처리 속도 우선 (5→3)
+            language=None,                  # 자동 언어 감지 (Auto-detect)
+            task="transcribe",              # 전사 작업 명시
+            temperature=0.0,                # 일관성을 위한 고정값
+            compression_ratio_threshold=2.4, # 한국어 압축 비율 최적화
+            log_prob_threshold=-1.0,        # 한국어 단어 확률 임계값 조정
+            no_speech_threshold=0.6,        # 무음 구간 감지 개선
             vad_filter=True,               # 음성 활동 감지
-            vad_parameters=dict(min_silence_duration_ms=500),  # VAD 세부 설정
-            temperature=0.0,               # 일관성을 위해 고정
-            compression_ratio_threshold=2.4,  # 더 엄격한 압축 임계값
-            no_speech_threshold=0.6,       # 더 엄격한 무음 임계값
-            condition_on_previous_text=False,  # 이전 텍스트에 의존하지 않음
+            vad_parameters=dict(min_silence_duration_ms=300),  # 한국어 특성 고려 (500→300ms)
+            word_timestamps=True,          # 단어별 타임스탬프 (한국어 분석용)
+            prepend_punctuations="\"'([{-",
+            append_punctuations="\"'.。,，!！?？:：\")}]、", # 한국어 문장부호 추가
+            condition_on_previous_text=False,  # 이전 텍스트에 의존하지 않음 (한국어 최적화)
             initial_prompt="한국어 회의 내용입니다. 정확한 전사가 필요합니다."
         )
         
@@ -815,17 +1031,28 @@ def complete_transcription_and_minutes():
             # 실시간 진행 표시 (GPU 사용률 포함)
             elapsed = (datetime.now() - start_time).total_seconds()
             
-            # Multi-GPU 메모리 사용량 표시 (10개마다)
+            # Multi-GPU 메모리 사용량 표시 (10개마다) - nvidia-smi로 정확한 측정
             gpu_info = ""
             if gpu_success and i % 10 == 0:
                 try:
-                    import torch
-                    if torch.cuda.is_available() and selected_gpu is not None:
-                        gpu_memory_used = torch.cuda.memory_allocated(selected_gpu) / (1024**3)
-                        gpu_info = f" [GPU {selected_gpu}: {gpu_memory_used:.1f}GB]"
+                    # CTranslate2는 자체 CUDA 메모리 관리를 하므로 nvidia-smi로 직접 확인
+                    import subprocess
+                    result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', 
+                                           '--format=csv,noheader,nounits', f'--id={selected_gpu}'], 
+                                           capture_output=True, text=True, timeout=2)
+                    if result.returncode == 0:
+                        gpu_memory_used_mb = int(result.stdout.strip())
+                        gpu_memory_used_gb = gpu_memory_used_mb / 1024
+                        # 실제로 메모리를 사용하고 있을 때만 표시 (1GB 이상)
+                        if gpu_memory_used_gb >= 1.0:
+                            gpu_info = f" [GPU {selected_gpu}: {gpu_memory_used_gb:.1f}GB]"
+                        else:
+                            gpu_info = f" [GPU {selected_gpu}: Active]"
+                    else:
+                        gpu_info = f" [GPU {selected_gpu}: Active]"
                 except Exception:
-                    # GPU 정보 가져오기 실패시 무시
-                    pass
+                    # GPU 정보 가져오기 실패시 기본값
+                    gpu_info = f" [GPU {selected_gpu}: Working]"
             
             print(f"✅ [{i+1:3d}] [{segment.start:6.1f}s → {segment.end:6.1f}s] {segment.text.strip()[:50]}{'...' if len(segment.text.strip()) > 50 else ''}{gpu_info}")
             
@@ -866,28 +1093,34 @@ def complete_transcription_and_minutes():
         f.write(f"{int(info.duration//60)}분 {int(info.duration%60)}초\n")
         f.write(f"언어: {info.language} (확률: {info.language_probability:.1%})\n\n")
         
-        # 화자 분리 수행
-        print("🎭 화자 분리 시작...")
-        try:
-            from speaker_diarization import perform_speaker_diarization, apply_speaker_diarization_to_transcription, simple_time_based_diarization
+        # 화자 분리 수행 (옵션에 따라)
+        if skip_diarization:
+            print("🚀 화자 분리 건너뛰기 - 빠른 처리 모드")
+            # 화자 정보 없이 기본 화자명 사용
+            for i, segment in enumerate(segments_list):
+                segment.speaker = f"화자{((i//10)%4)+1}"  # 기본 화자명 할당
+        else:
+            print("🎭 화자 분리 시작...")
+            try:
+                from speaker_diarization import perform_speaker_diarization, apply_speaker_diarization_to_transcription, simple_time_based_diarization
+                
+                # 실제 화자 분리 시도
+                speaker_segments = perform_speaker_diarization(audio_file, num_speakers=None)
+                
+                if speaker_segments:
+                    # 실제 화자 분리 성공
+                    segments_list = apply_speaker_diarization_to_transcription(segments_list, speaker_segments)
+                    print("✅ 실제 음성 특성 기반 화자 분리 적용 완료")
+                else:
+                    # 실패시 시간 기반 화자 구분
+                    segments_list = simple_time_based_diarization(segments_list, gap_threshold=5.0, max_speakers=4)
+                    print("✅ 시간 기반 화자 구분 적용 완료")
             
-            # 실제 화자 분리 시도
-            speaker_segments = perform_speaker_diarization(audio_file, num_speakers=None)
-            
-            if speaker_segments:
-                # 실제 화자 분리 성공
-                segments_list = apply_speaker_diarization_to_transcription(segments_list, speaker_segments)
-                print("✅ 실제 음성 특성 기반 화자 분리 적용 완료")
-            else:
-                # 실패시 시간 기반 화자 구분
+            except ImportError:
+                # pyannote.audio 없으면 시간 기반 사용
+                from speaker_diarization import simple_time_based_diarization
                 segments_list = simple_time_based_diarization(segments_list, gap_threshold=5.0, max_speakers=4)
-                print("✅ 시간 기반 화자 구분 적용 완료")
-        
-        except ImportError:
-            # pyannote.audio 없으면 시간 기반 사용
-            from speaker_diarization import simple_time_based_diarization
-            segments_list = simple_time_based_diarization(segments_list, gap_threshold=5.0, max_speakers=4)
-            print("✅ 시간 기반 화자 구분 적용 완료 (pyannote.audio 미설치)")
+                print("✅ 시간 기반 화자 구분 적용 완료 (pyannote.audio 미설치)")
         
         # 화자 정보를 포함한 STT 파일 저장
         for i, segment in enumerate(segments_list):
@@ -912,12 +1145,46 @@ def complete_transcription_and_minutes():
     # 전체 텍스트 분석
     all_text = " ".join([seg.text for seg in segments_list])
     
-    print("🤖 AI를 사용해서 회의록 생성 중...")
-    show_resource_usage(process, "AI 분석 전")
-    
-    # AI를 사용해서 회의록 생성
-    meeting_analysis = analyze_meeting_with_ai(all_text)
-    show_resource_usage(process, "AI 분석 완료")
+    # AI 분석 수행 (옵션에 따라)
+    if skip_ai:
+        print("⚡ AI 분석 건너뛰기 - 기본 템플릿 회의록 생성")
+        # 기본 회의록 템플릿 사용
+        meeting_analysis = {
+            'summary': f"{base_name} 회의 내용을 정리한 회의록입니다.",
+            'participants': "참석자 정보 없음",
+            'key_points': ["STT 전사 내용을 참조하시기 바랍니다."],
+            'action_items': ["후속 조치 사항 없음"],
+            'next_meeting': "다음 회의 일정 없음"
+        }
+    else:
+        # GPU 전용 설정
+        import subprocess
+        
+        # GPU가속을 위한 환경 변수 설정 (Ollama GPU 필수)
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'  # 두 GPU 모두 사용 가능
+        
+        print("🎯 GPU 전용 모드 활성화!")
+        print("🚀 vLLM 서버로 AI 처리 가속화")
+        
+        # GPU 전용 모드에서는 Ollama 상태 확인 생략 (CPU 스파이크 방지)
+        if skip_diarization:
+            print("🤖 AI를 사용해서 회의록 생성 중... (화자 분리 없음 - 빠른 모드)")
+        else:
+            print("🤖 AI를 사용해서 회의록 생성 중...")
+        
+        show_resource_usage(process, "AI 분석 전")
+        
+        # AI를 사용해서 회의록 생성
+        meeting_analysis = analyze_meeting_with_ai(all_text)
+        
+        # AI 분석이 실패했을 경우 개선된 폴백 분석 사용
+        if meeting_analysis is None:
+            print("⚠️ AI 분석 실패 - 개선된 폴백 분석 사용")
+            # 실제 STT 내용을 분석해서 의미있는 회의록 생성
+            fallback_analysis_text = create_fallback_analysis(all_text)
+            meeting_analysis = fallback_analysis_text  # 문자열로 직접 사용
+        
+        show_resource_usage(process, "AI 분석 완료")
     
     print("📄 회의록 파일 생성 중...")
     
@@ -935,6 +1202,70 @@ def complete_transcription_and_minutes():
     print(f"📂 저장 위치: {output_dir}")
     print(f"{'='*60}")
     
+    # 이메일 발송 옵션
+    if EMAIL_AVAILABLE:
+        print("\n📧 이메일 발송 옵션")
+        print("1. 이메일로 회의록 발송")
+        print("2. 건너뛰기")
+        
+        choice = input("선택하세요 (1-2, 기본값: 2): ").strip()
+        
+        if choice == '1':
+            try:
+                # 환경변수에서 미리 설정된 정보 확인
+                sender_email = os.environ.get('SENDER_EMAIL')
+                sender_password = os.environ.get('SENDER_PASSWORD')
+                email_to = os.environ.get('EMAIL_TO')
+                
+                # 미설정시 사용자 입력 요청
+                if not sender_email or not sender_password or not email_to:
+                    print("\n📧 이메일 설정이 필요합니다.")
+                    sender_email, sender_password, recipient_emails = setup_email_config()
+                    if not sender_email:
+                        print("❌ 이메일 설정을 건너뜁니다.")
+                    else:
+                        # 회의록 이메일 발송 (발신자 자동 감지)
+                        meeting_title = os.path.splitext(os.path.basename(audio_file))[0]
+                        success = send_meeting_minutes_email(
+                            meeting_minutes_path=minutes_output,
+                            stt_result_path=stt_output,
+                            recipient_emails=recipient_emails,
+                            meeting_title=meeting_title,
+                            sender_email=sender_email,
+                            sender_password=sender_password,
+                            audio_file_path=audio_file,
+                            auto_reply_to_sender=True
+                        )
+                        if success:
+                            print("✅ 이메일 발송 완료!")
+                        else:
+                            print("❌ 이메일 발송 실패")
+                else:
+                    # 환경변수로 설정된 경우 자동 발송 (발신자 자동 감지)
+                    meeting_title = os.path.splitext(os.path.basename(audio_file))[0]
+                    recipient_emails = [email.strip() for email in email_to.split(',')]
+                    success = send_meeting_minutes_email(
+                        meeting_minutes_path=minutes_output,
+                        stt_result_path=stt_output,
+                        recipient_emails=recipient_emails,
+                        meeting_title=meeting_title,
+                        sender_email=sender_email,
+                        sender_password=sender_password,
+                        audio_file_path=audio_file,
+                        auto_reply_to_sender=True
+                    )
+                    if success:
+                        print("✅ 이메일 자동 발송 완료!")
+                    else:
+                        print("❌ 이메일 발송 실패")
+                        
+            except Exception as e:
+                print(f"❌ 이메일 발송 중 오류: {str(e)}")
+        else:
+            print("📧 이메일 발송을 건너뜁니다.")
+    else:
+        print("⚠️ 이메일 기능을 사용할 수 없습니다.")
+
     # 최종 자원 사용량
     show_resource_usage(process, "처리 완료")
     
@@ -1281,6 +1612,37 @@ def analyze_meeting_with_ai(meeting_text):
     print("🔍 AI 분석 시작...")
     print(f"📝 분석할 텍스트 길이: {len(meeting_text):,}자")
     
+    # 텍스트가 너무 짧으면 폴백 분석 사용
+    if len(meeting_text.strip()) < 50:
+        print("⚠️ 분석할 텍스트가 너무 짧음 - 폴백 분석 사용")
+        return None
+    
+    # Ollama 서버 연결 테스트
+    try:
+        print("🔗 Ollama 서버 연결 확인...")
+        test_response = requests.get("http://localhost:11434/api/tags", timeout=5)
+        if test_response.status_code != 200:
+            print(f"❌ Ollama 서버 응답 오류: {test_response.status_code}")
+            return None
+        
+        tags_info = test_response.json()
+        models = tags_info.get('models', [])
+        qwen_model = next((m for m in models if 'qwen3:8b' in m.get('name', '')), None)
+        
+        if qwen_model:
+            print("🤖 Ollama 모델: qwen3:8b")
+            print("📊 엔진 상태: 사용 가능")
+        else:
+            print("❌ qwen3:8b 모델을 찾을 수 없음")
+            return None
+            
+    except requests.exceptions.ConnectionError:
+        print("❌ Ollama 서버에 연결할 수 없습니다. 서버가 실행되고 있는지 확인하세요.")
+        return None
+    except Exception as e:
+        print(f"❌ Ollama 서버 확인 중 오류: {str(e)}")
+        return None
+    
     # 텍스트가 너무 크면 청크로 분할
     if len(meeting_text) > 10000:
         print("📊 긴 텍스트 감지 - 청크 단위로 분할 처리")
@@ -1304,110 +1666,95 @@ def analyze_meeting_with_ai(meeting_text):
         # 작은 텍스트는 그대로 처리
         return analyze_text_chunk(meeting_text, 1)
 
+def analyze_with_ollama(meeting_text):
+    """Ollama를 사용한 회의 내용 분석"""
+    import requests
+    import json
+    
+    try:
+        url = "http://localhost:11434/api/generate"
+        print("🌐 Ollama API 연결 중...")
+        
+        prompt = f"""회의 전사 내용을 분석해서 아래 형식으로 회의록을 작성하세요.
+
+전사 내용:
+{meeting_text}
+
+회의록 형식:
+1. 회의 주제: [핵심 주제를 한 줄로]
+
+2. 주요 내용:
+   1. [첫 번째 논의사항]
+      - [세부 내용]
+   2. [두 번째 논의사항] 
+      - [세부 내용]
+
+3. 이슈사항(미결사항):
+   ◦ [해결되지 않은 문제들]
+
+4. 결정사항:
+   ◦ [회의에서 결정된 내용들]
+
+규칙: 추론 과정 없이 회의록만 출력하세요."""
+
+        payload = {
+            "model": "qwen3:8b",
+            "prompt": prompt,
+            "stream": False
+        }
+        
+        print("🤖 qwen3-8b 모델로 분석 중...")
+        response = requests.post(url, json=payload, timeout=180)
+        
+        if response.status_code == 200:
+            result = response.json()
+            ai_response = result.get('response', '')
+            if ai_response:
+                # <think> 태그와 추론 과정 제거
+                cleaned_response = clean_ai_response(ai_response)
+                return cleaned_response.strip() if cleaned_response else None
+        
+        print(f"❌ Ollama API 오류: {response.status_code}")
+        return None
+        
+    except Exception as e:
+        print(f"❌ Ollama 분석 실패: {e}")
+        return None
+
+def create_simple_analysis():
+    """기본 분석 결과 생성 (AI 서버 사용 불가 시)"""
+    return """1. 회의 주제: 회의 내용 분석 중
+
+2. 주요 내용:
+   1. AI 분석 서버가 사용 불가능한 상태입니다
+      - Ollama 서버 연결을 확인해주세요
+      - 수동으로 회의록을 작성해주세요
+
+3. 이슈사항(미결사항):
+   ◦ AI 분석 기능 복구 필요
+   ◦ 서버 연결 상태 점검 필요
+
+4. 결정사항:
+   ◦ 수동으로 회의록 작성 진행"""
+
 def analyze_text_chunk(chunk_text, chunk_num=1):
     """개별 텍스트 청크 분석"""
     import requests
     import json
     
-    # vLLM 서버 먼저 시도
+    # Ollama 서버 사용 (안정적인 처리)
     try:
-        vllm_available = requests.get("http://localhost:8000/health", timeout=2)
-        if vllm_available.status_code == 200:
-            print("🚀 vLLM 서버 사용 (더 빠른 처리)")
-            return analyze_with_vllm(chunk_text)
-    except:
-        pass
-    
-    try:
-        # Ollama 모델 사용 (32B 우선, 실패하면 8B로 폴백)
-        url = "http://localhost:11434/api/generate"
-        
-        # 32B 모델 존재 여부 확인 후 선택
-        try:
-            import subprocess
-            result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, timeout=5)
-            if "qwen3:32b" in result.stdout:
-                model_to_use = "qwen3:32b"
-                print(f"🚀 Ollama {model_to_use} 연결 중... (청크 {chunk_num}) - 고품질 32B 모델")
-            else:
-                model_to_use = "qwen3:8b"
-                print(f"🚀 Ollama {model_to_use} 연결 중... (청크 {chunk_num}) - 32B 모델 없음, 8B 사용")
-        except:
-            model_to_use = "qwen3:8b"
-            print(f"🚀 Ollama {model_to_use} 연결 중... (청크 {chunk_num}) - 모델 확인 실패, 8B 사용")
-        
-        # 청크용 간단한 프롬프트
-        prompt = f"""다음 회의 일부 내용을 간단히 요약해주세요. 
-
-회의 내용 (일부):
-{chunk_text}
-
-이 부분에서 다루어진 주요 내용들을 bullet point로 간단히 정리해주세요:
-
-• [주요 논의사항 1]
-• [주요 논의사항 2] 
-• [결정사항이나 중요 포인트]
-
-간결하게 핵심만 추출하고, 마크다운이나 추론 과정은 포함하지 마세요."""
-
-        # 모델에 따른 최적화된 옵션 설정
-        if "32b" in model_to_use:
-            options = {
-                "temperature": 0.1,     # 32B는 더 낮은 temperature로 일관성 확보
-                "top_p": 0.7,
-                "top_k": 10,
-                "repeat_penalty": 1.1,
-                "num_ctx": 8192,        # 32B는 더 큰 컨텍스트 사용
-                "num_predict": 1024     # 32B는 더 긴 응답 생성 가능
-            }
-        else:
-            options = {
-                "temperature": 0.2,     # 8B는 약간 높은 temperature
-                "top_p": 0.8,
-                "top_k": 20,
-                "repeat_penalty": 1.1,
-                "num_ctx": 4096,        # 8B는 표준 컨텍스트
-                "num_predict": 512      # 8B는 짧은 응답
-            }
-        
-        payload = {
-            "model": model_to_use,
-            "prompt": prompt,
-            "stream": False,
-            "options": options
-        }
-        
-        print(f"🚀 {model_to_use} 모델로 청크 {chunk_num} 분석 중...")
-        if "32b" in model_to_use:
-            print(f"⏳ 청크 처리 중... (고품질 32B 모델)")
-            timeout_seconds = 300  # 32B 모델은 5분 타임아웃
-        else:
-            print(f"⏳ 청크 처리 중... (빠른 8B 모델)")
-            timeout_seconds = 120   # 8B 모델은 2분 타임아웃
-        
-        import time
-        start_time = time.time()
-        
-        response = requests.post(url, json=payload, timeout=timeout_seconds)
-        
-        elapsed = time.time() - start_time
-        
-        print(f"🔍 API 응답 상태: {response.status_code}")
-        
-        if response.status_code == 200:
-            result = response.json()
-            analysis = result.get('response', '')
-            print(f"✅ 청크 {chunk_num} 분석 완료! (소요시간: {elapsed:.1f}초)")
-            # <think> 부분 제거
-            cleaned_analysis = clean_ai_response(analysis)
-            return cleaned_analysis
-        else:
-            print(f"❌ 청크 {chunk_num} 분석 실패: {response.status_code}")
-            return None
-            
+        # Ollama 서버 연결 확인
+        ollama_available = requests.get("http://localhost:11434/api/tags", timeout=2)
+        if ollama_available.status_code == 200:
+            print("🚀 Ollama 서버 사용 (안정적인 처리)")
+            return analyze_with_ollama(chunk_text)
     except Exception as e:
-        print(f"❌ 청크 {chunk_num} 분석 오류: {str(e)}")
-        return None
+        print(f"⚠️ Ollama 서버 연결 실패: {e}")
+    
+    # 서버가 없으면 fallback 사용
+    print("⚠️ AI 서버 사용 불가 - 기본 분석 사용")
+    return create_simple_analysis()
 
 def clean_ai_response(ai_response):
     """AI 응답에서 <think> 부분과 추론 과정 제거"""
@@ -1421,20 +1768,43 @@ def clean_ai_response(ai_response):
     cleaned_response = re.sub(r'<think>.*?</think>', '', cleaned_response, flags=re.DOTALL | re.IGNORECASE)
     
     # <think>으로 시작하지만 </think>이 없는 경우 (줄 끝까지 제거)
-    cleaned_response = re.sub(r'<think>.*', '', cleaned_response, flags=re.DOTALL | re.IGNORECASE)
+    cleaned_response = re.sub(r'<think>.*?$', '', cleaned_response, flags=re.DOTALL | re.IGNORECASE)
     
-    # 다른 추론 패턴들도 제거
-    patterns_to_remove = [
-        r'Let me.*?(?=\n\[|\[|$)',
-        r'I need to.*?(?=\n\[|\[|$)', 
-        r'First.*?(?=\n\[|\[|$)',
-        r'I will.*?(?=\n\[|\[|$)',
-        r'Let\'s.*?(?=\n\[|\[|$)',
-        r'I\'ll.*?(?=\n\[|\[|$)'
+    # • <think> 형태의 리스트 항목도 제거
+    cleaned_response = re.sub(r'^• <think>.*?$', '', cleaned_response, flags=re.MULTILINE | re.DOTALL | re.IGNORECASE)
+    
+    # 영어 추론 패턴들도 제거 (더 강화된 패턴)
+    english_patterns = [
+        r'Okay.*?(?=\n[1-9]|\n•|$)',
+        r'Let me.*?(?=\n[1-9]|\n•|$)',
+        r'I need to.*?(?=\n[1-9]|\n•|$)',
+        r'First.*?(?=\n[1-9]|\n•|$)',
+        r'I will.*?(?=\n[1-9]|\n•|$)',
+        r'Let\'s.*?(?=\n[1-9]|\n•|$)',
+        r'I\'ll.*?(?=\n[1-9]|\n•|$)',
+        r'So.*?(?=\n[1-9]|\n•|$)',
+        r'The.*?(?=\n[1-9]|\n•|$)',
+        r'For the.*?(?=\n[1-9]|\n•|$)',
+        r'Based on.*?(?=\n[1-9]|\n•|$)'
     ]
     
-    for pattern in patterns_to_remove:
+    for pattern in english_patterns:
         cleaned_response = re.sub(pattern, '', cleaned_response, flags=re.DOTALL | re.IGNORECASE)
+    
+    # "• " 로 시작하는 불완전한 줄 제거
+    lines = cleaned_response.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        # 빈 "• " 항목이거나 영어로만 된 추론 라인은 제거
+        if line == '•' or (line.startswith('•') and len(line.split()) < 3 and not any(ord(c) > 127 for c in line)):
+            continue
+        # 한국어가 포함된 유효한 내용만 유지
+        if line and (any(ord(c) > 127 for c in line) or line.startswith(('1.', '2.', '3.', '4.', '◦'))):
+            cleaned_lines.append(line)
+    
+    cleaned_response = '\n'.join(cleaned_lines)
     
     # 연속된 빈 줄 제거
     cleaned_response = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned_response)
@@ -1445,34 +1815,88 @@ def clean_ai_response(ai_response):
     return cleaned_response
 
 def combine_chunk_results(chunk_results):
-    """청크 결과들을 하나의 회의록으로 합치기"""
+    """청크 결과들을 하나의 통합 회의록으로 합치기"""
     print("🔗 청크 결과들을 통합 중...")
     
-    combined_content = "[회의 개요]\n"
-    combined_content += "• 다양한 업무와 프로젝트 논의가 진행됨\n"
-    combined_content += "• 여러 주제에 걸친 종합적 검토 및 의사결정\n\n"
+    # 각 청크에서 섹션별 내용 추출
+    topics = set()
+    main_contents = []
+    issues = []
+    decisions = []
     
-    combined_content += "[주요 논의 내용]\n"
+    for chunk_result in chunk_results:
+        if not chunk_result or not chunk_result.strip():
+            continue
+            
+        lines = chunk_result.strip().split('\n')
+        current_section = None
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # 섹션 구분
+            if '회의 주제:' in line:
+                topic = line.split('회의 주제:')[-1].strip()
+                if topic:
+                    topics.add(topic)
+            elif '주요 내용:' in line:
+                current_section = 'main'
+            elif '이슈사항' in line or '미결사항' in line:
+                current_section = 'issues'
+            elif '결정사항' in line:
+                current_section = 'decisions'
+            elif line.startswith(('1.', '2.', '3.', '4.', '-', '•', '◦')):
+                # 각 섹션의 내용 수집
+                if current_section == 'main' and line not in main_contents:
+                    main_contents.append(line)
+                elif current_section == 'issues' and line not in issues:
+                    issues.append(line)
+                elif current_section == 'decisions' and line not in decisions:
+                    decisions.append(line)
     
-    for i, chunk_result in enumerate(chunk_results, 1):
-        if chunk_result and chunk_result.strip():
-            # 청크 결과를 정리해서 추가
-            lines = chunk_result.strip().split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and not line.startswith('[') and not line.startswith('#'):
-                    if not line.startswith('•'):
-                        combined_content += f"• {line}\n"
-                    else:
-                        combined_content += f"{line}\n"
+    # 통합 회의록 생성
+    combined_content = ""
     
-    combined_content += "\n[주요 결정사항 및 향후 계획]\n"
-    combined_content += "• 논의된 사항들의 단계별 실행 계획 수립\n"
-    combined_content += "• 관련 부서 간 협조 체계 구축\n\n"
+    # 회의 주제 (복수 주제를 하나로 통합)
+    if topics:
+        combined_topic = "종합 회의 - " + ", ".join(list(topics)[:2])  # 최대 2개 주제만
+        combined_content += f"1. 회의 주제: {combined_topic}\n\n"
+    else:
+        combined_content += "1. 회의 주제: 종합 회의록\n\n"
     
-    combined_content += "[미해결 이슈 및 추후 논의사항]\n"
-    combined_content += "• 추가 검토가 필요한 기술적 사항들\n"
-    combined_content += "• 다음 회의에서 우선적으로 다룰 안건들\n\n"
+    # 주요 내용
+    combined_content += "2. 주요 내용:\n"
+    if main_contents:
+        for i, content in enumerate(main_contents[:10], 1):  # 최대 10개 항목
+            # 번호 정리
+            clean_content = content.lstrip('1234567890.-•◦ ')
+            combined_content += f"   {i}. {clean_content}\n"
+    else:
+        combined_content += "   1. 다양한 주제에 대한 포괄적 논의 진행\n"
+    
+    combined_content += "\n"
+    
+    # 이슈사항
+    combined_content += "3. 이슈사항(미결사항):\n"
+    if issues:
+        for issue in issues[:5]:  # 최대 5개 이슈
+            clean_issue = issue.lstrip('1234567890.-•◦ ')
+            combined_content += f"   ◦ {clean_issue}\n"
+    else:
+        combined_content += "   ◦ 추가 검토가 필요한 기술적 사항들\n"
+    
+    combined_content += "\n"
+    
+    # 결정사항
+    combined_content += "4. 결정사항:\n"
+    if decisions:
+        for decision in decisions[:5]:  # 최대 5개 결정사항
+            clean_decision = decision.lstrip('1234567890.-•◦ ')
+            combined_content += f"   ◦ {clean_decision}\n"
+    else:
+        combined_content += "   ◦ 논의된 사항들의 단계별 실행 계획 수립\n"
     
     combined_content += "참고: 긴 회의록을 청크 단위로 처리하여 생성됨"
     
@@ -1500,34 +1924,90 @@ def parse_meeting_analysis(ai_response):
         return create_fallback_analysis("")
 
 def create_fallback_analysis(meeting_text):
-    """AI 분석 실패시 폴백 분석 - bullet point 개조식"""
-    return """[회의 개요]
-• 다양한 업무와 프로젝트 논의 진행
-• 현재 작업 진행 상황 및 향후 계획 검토
-• 관련 부서 담당자들 참석
+    """AI 분석 실패시 폴백 분석 - 실제 STT 내용 기반"""
+    
+    # STT 내용에서 주요 키워드 추출
+    keywords = extract_keywords_from_text(meeting_text)
+    important_sentences = extract_important_sentences(meeting_text)
+    
+    # 회의록 구성
+    analysis = "[회의 개요]\n"
+    if keywords:
+        analysis += f"• 주요 논의 주제: {', '.join(keywords[:5])}\n"
+    else:
+        analysis += "• 업무 진행 현황 및 향후 계획 논의\n"
+    analysis += f"• 전사 텍스트 길이: 약 {len(meeting_text):,}자\n"
+    analysis += f"• 회의 진행 내용 전체 기록됨\n\n"
+    
+    analysis += "[주요 논의 내용]\n"
+    if important_sentences:
+        for i, sentence in enumerate(important_sentences[:8], 1):
+            analysis += f"• {sentence}\n"
+    else:
+        analysis += "• 다양한 업무 관련 사항 논의\n"
+        analysis += "• 현재 진행 상황 점검 및 향후 계획 수립\n"
+        analysis += "• 관련 업무 담당자들과의 협의\n"
+    
+    analysis += "\n[기타 사항]\n"
+    analysis += "• 전사 내용이 길어 자동 요약으로 대체됨\n"
+    analysis += "• 정확한 내용은 첨부된 전사 파일을 참고하세요\n"
+    analysis += "• AI 분석 기능 사용 시 더 상세한 회의록 생성 가능\n\n"
+    
+    analysis += "※ 이 회의록은 STT 전사 내용을 기반으로 자동 생성되었습니다."
+    
+    return analysis
 
-[주요 논의 내용]
-• 시스템 개발 관련 기술적 사항
-  - 현재 개발 중인 기능 구현 방안
-  - 시스템 개선 사항 검토
-• 사용자 요구사항 반영 방안
-  - 시스템 개선 방향 논의
-  - 활발한 의견 교환
-• 데이터 처리 및 시스템 연계 이슈
-  - 기존 시스템과의 호환성 검토
-  - 새로운 기능 추가 방안 논의
+def extract_keywords_from_text(text):
+    """텍스트에서 주요 키워드 추출 (간단한 빈도 기반)"""
+    import re
+    from collections import Counter
+    
+    # 한글, 영문, 숫자 단어만 추출
+    words = re.findall(r'[가-힣a-zA-Z0-9]{2,}', text)
+    
+    # 불용어 제거 (더 포괄적)
+    stopwords = {'이것', '그것', '저것', '하는', '되는', '있는', '없는', '했다', '됐다', '있다', '없다', 
+                '그런데', '하지만', '그래서', '그리고', '그런', '이런', '저런', '같은', '다른',
+                '때문', '경우', '상황', '부분', '관련', '대한', '에서', '으로', '를', '가', '이', '을',
+                '하고', '해서', '해도', '하면', '한다', '한다', '합니다', '입니다', '습니다',
+                '그리고', '또한', '그래서', '따라서', '하지만', '그러나', '그런데', '마찬가지로',
+                '정도', '것', '거', '건', '게', '놈', '년', '것들', '분', '명', '개', '번', '차', '회',
+                '때', '중', '후', '전', '간', '동안', '사이', '위', '아래', '앞', '뒤', '옆', '안', '밖'}
+    
+    # 빈도수 계산 (불용어 제외)
+    word_counts = Counter([word for word in words if word not in stopwords and len(word) >= 2])
+    
+    # 상위 키워드 반환
+    return [word for word, count in word_counts.most_common(10) if count >= 2]
 
-[주요 결정사항 및 향후 계획]
-• 현재 진행 중인 개발 작업 계속 추진
-• 일정 및 우선순위 재조정
-• 시스템 안정성 확보를 위한 추가 검토 과정
-
-[미해결 이슈 및 추후 논의사항]
-• 기술적 세부사항 추가 검토 필요
-• 다음 회의에서 우선적으로 논의 예정
-• 구체적인 해결 방안 도출 필요
-
-참고: AI 분석 실패로 기본 템플릿 생성. 정확한 내용은 전사 파일 참고 바람."""
+def extract_important_sentences(text, max_sentences=8):
+    """텍스트에서 중요한 문장들 추출"""
+    import re
+    
+    # 문장 분리
+    sentences = re.split(r'[.!?]\s+', text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    
+    if not sentences:
+        return []
+    
+    # 길이가 적절한 문장들 선별 (너무 짧거나 긴 문장 제외)
+    good_sentences = []
+    for sentence in sentences:
+        if 20 <= len(sentence) <= 150:  # 적절한 길이의 문장
+            # 의미있는 내용이 있는 문장인지 간단히 체크
+            if any(keyword in sentence for keyword in ['진행', '계획', '검토', '결정', '논의', '추진', '개발', '시스템', '업무', '작업']):
+                good_sentences.append(sentence)
+    
+    # 최대 개수만큼 반환 (앞부분과 뒷부분에서 골고루)
+    if len(good_sentences) <= max_sentences:
+        return good_sentences
+    else:
+        # 앞쪽 절반, 뒤쪽 절반에서 균등하게 선택
+        mid = len(good_sentences) // 2
+        front_half = good_sentences[:mid][::max(1, mid//(max_sentences//2))]
+        back_half = good_sentences[mid:][::max(1, (len(good_sentences)-mid)//(max_sentences//2))]
+        return front_half[:max_sentences//2] + back_half[:max_sentences//2]
 
 def create_meeting_minutes_txt(output_path, segment_count, info, analysis, base_name):
     """자연스러운 줄글 형식의 회의록 TXT 생성"""
@@ -1547,7 +2027,62 @@ def create_meeting_minutes_txt(output_path, segment_count, info, analysis, base_
         f.write("=" * 60 + "\n\n")
         
         # AI 생성 회의록 내용 (줄글 형식)
-        f.write(analysis)
+        if isinstance(analysis, dict):
+            # dict인 경우 문자열로 변환
+            analysis_text = ""
+            if 'summary' in analysis and analysis['summary']:
+                analysis_text += f"회의 개요: {analysis['summary']}\n\n"
+            else:
+                analysis_text += f"회의 개요: {base_name} 회의 내용을 정리한 회의록입니다.\n\n"
+            
+            if 'participants' in analysis and analysis['participants']:
+                analysis_text += f"참석자: {analysis['participants']}\n\n"
+            else:
+                analysis_text += "참석자: 참석자 정보 없음\n\n"
+            
+            if 'key_points' in analysis and isinstance(analysis['key_points'], list) and analysis['key_points']:
+                analysis_text += "주요 논의사항:\n"
+                for point in analysis['key_points']:
+                    if point.strip():
+                        analysis_text += f"• {point}\n"
+                analysis_text += "\n"
+            else:
+                analysis_text += "주요 논의사항:\n• 전사 결과 파일에서 상세 내용을 확인하시기 바랍니다.\n\n"
+            
+            if 'decisions' in analysis and isinstance(analysis['decisions'], list) and analysis['decisions']:
+                analysis_text += "결정사항:\n"
+                for decision in analysis['decisions']:
+                    if decision.strip():
+                        analysis_text += f"• {decision}\n"
+                analysis_text += "\n"
+            
+            if 'issues' in analysis and isinstance(analysis['issues'], list) and analysis['issues']:
+                analysis_text += "이슈사항:\n"
+                for issue in analysis['issues']:
+                    if issue.strip():
+                        analysis_text += f"• {issue}\n"
+                analysis_text += "\n"
+            
+            if 'plans' in analysis and isinstance(analysis['plans'], list) and analysis['plans']:
+                analysis_text += "향후 계획:\n"
+                for plan in analysis['plans']:
+                    if plan.strip():
+                        analysis_text += f"• {plan}\n"
+                analysis_text += "\n"
+            
+            f.write(analysis_text)
+        else:
+            # 문자열인 경우 그대로 사용 (이미 개선된 fallback_analysis)
+            analysis_str = str(analysis) if analysis else ""
+            if analysis_str.strip():
+                f.write(analysis_str)
+            else:
+                # 분석이 완전히 실패한 경우
+                f.write(f"회의 개요: {base_name} 회의 내용 분석\n\n")
+                f.write("주요 논의사항:\n")
+                f.write("• 음성 전사가 완료되었습니다.\n")
+                f.write("• 상세 내용은 첨부된 전사 파일을 참고하시기 바랍니다.\n\n")
+                f.write("참고: AI 분석 기능을 사용하면 더 상세한 회의록을 생성할 수 있습니다.\n")
         
         f.write("\n\n" + "=" * 60 + "\n")
         f.write("첨부 파일\n")
@@ -1830,8 +2365,375 @@ def create_meeting_document(word_dir, base_name, info, analysis):
     with open(os.path.join(word_dir, "document.xml"), 'w', encoding='utf-8') as f:
         f.write(document_xml)
 
+def check_transcription_quality(segments_list, progress_callback=None):
+    """전사 품질 검사 - 반복적인 자막/메뉴 텍스트 감지"""
+    if not segments_list:
+        return {"is_valid": False, "message": "전사 결과가 없습니다.", "issues": ["no_content"]}
+    
+    # 모든 전사 텍스트 수집
+    all_texts = [segment.text.strip() for segment in segments_list if segment.text.strip()]
+    
+    if not all_texts:
+        return {"is_valid": False, "message": "전사된 텍스트가 없습니다.", "issues": ["empty_transcription"]}
+    
+    # 문제적인 반복 패턴들
+    repetitive_patterns = [
+        "자막은 설정에서 선택하실 수 있습니다",
+        "띄어쓰기와 문장부호를 정확히 표시해주세요",
+        "할인도요 얘기하는거에요",
+        "저 얼굴",
+        "subtitle",
+        "caption",
+        "설정",
+        "메뉴"
+    ]
+    
+    # 반복 비율 계산
+    unique_texts = set(all_texts)
+    repetition_ratio = 1 - (len(unique_texts) / len(all_texts))
+    
+    issues = []
+    sample_text = " / ".join(all_texts[:5])  # 처음 5개 샘플
+    
+    # 1. 높은 반복률 검사 (50% 이상 반복)
+    if repetition_ratio > 0.5:
+        issues.append("high_repetition")
+        if progress_callback:
+            progress_callback(f"⚠️ 오디오 품질 문제: 반복률 {repetition_ratio:.1%} (임계값: 50%)")
+    
+    # 2. 특정 패턴 검사
+    pattern_matches = 0
+    for text in all_texts[:10]:  # 처음 10개만 검사
+        for pattern in repetitive_patterns:
+            if pattern in text.lower():
+                pattern_matches += 1
+                break
+    
+    pattern_ratio = pattern_matches / min(len(all_texts), 10)
+    
+    if pattern_ratio > 0.5:  # 50% 이상이 문제적 패턴
+        issues.append("repetitive_menu_content")
+        if progress_callback:
+            progress_callback(f"⚠️ 자막/메뉴 콘텐츠 감지: {pattern_ratio:.1%}")
+    
+    # 3. 너무 짧은 세그먼트들
+    if len(all_texts) > 20 and all(len(text.split()) < 3 for text in all_texts[:10]):
+        issues.append("too_short_segments")
+        if progress_callback:
+            progress_callback("⚠️ 비정상적으로 짧은 음성 세그먼트들")
+    
+    # 4. 단일 문자/단어 반복 감지 (예: "아 아 아 아..." or "그는 그는 그는...")
+    single_char_repeat_count = 0
+    single_word_repeat_count = 0
+    
+    for text in all_texts[:20]:  # 처음 20개 검사
+        words = text.strip().split()
+        
+        # 단일 문자 반복 (예: "아 아 아 아...")
+        if len(words) > 3 and len(set(words)) == 1 and len(words[0]) <= 2:
+            single_char_repeat_count += 1
+        
+        # 단일 단어 반복 (예: "그는 그는 그는...")
+        if len(words) > 2 and len(set(words)) == 1:
+            single_word_repeat_count += 1
+    
+    if single_char_repeat_count > 2 or single_word_repeat_count > 3:
+        issues.append("single_word_repetition")
+        if progress_callback:
+            progress_callback(f"⚠️ 단일 문자/단어 반복 감지: {single_char_repeat_count + single_word_repeat_count}개 구간")
+    
+    # 결과 판정
+    if issues:
+        error_messages = {
+            "high_repetition": f"오디오에 동일한 내용이 {repetition_ratio:.1%} 반복됩니다. 실제 회의 내용이 아닌 것 같습니다.",
+            "repetitive_menu_content": "오디오에 자막/메뉴 관련 텍스트가 반복적으로 나타납니다. 비디오 플레이어 오버레이나 자막 음성이 포함된 것 같습니다.",
+            "too_short_segments": "음성 세그먼트가 비정상적으로 짧습니다.",
+            "single_word_repetition": f"단일 문자나 단어가 반복적으로 나타납니다 (예: '아 아 아...', '그는 그는...'). 실제 회의 내용이 아닌 더미 오디오일 가능성이 높습니다."
+        }
+        
+        main_issue = issues[0]  # 첫 번째 문제를 주요 문제로
+        message = error_messages.get(main_issue, "오디오 품질에 문제가 있습니다.")
+        message += f"\n\n감지된 텍스트 샘플: {sample_text}\n\n해결 방법:\n"
+        message += "1. 원본 비디오에서 오버레이/자막이 없는 깨끗한 오디오로 다시 추출해주세요.\n"
+        message += "2. 실제 회의 음성이 포함된 파일인지 확인해주세요.\n"
+        message += "3. 다른 오디오 파일로 다시 시도해주세요."
+        
+        return {
+            "is_valid": False,
+            "message": message,
+            "sample_text": sample_text,
+            "issues": issues,
+            "repetition_ratio": repetition_ratio,
+            "pattern_ratio": pattern_ratio
+        }
+    
+    # 품질이 좋으면 통과
+    if progress_callback:
+        progress_callback(f"✅ 오디오 품질 검사 통과 (반복률: {repetition_ratio:.1%}, 고유 세그먼트: {len(unique_texts)}개)")
+    
+    return {"is_valid": True, "message": "품질 검사 통과"}
+
+def transcribe_audio_for_api(audio_file_path, progress_callback=None):
+    """API 전용 STT 처리 함수 - 사용자 입력 없이 자동 처리"""
+    try:
+        import torch
+        from faster_whisper import WhisperModel
+        
+        # GPU 확인
+        if not torch.cuda.is_available():
+            return {"success": False, "error": "CUDA가 사용 불가능합니다"}
+        
+        if progress_callback:
+            progress_callback("🤖 Whisper Large-v3 모델 로딩 중...")
+        
+        # 모델 초기화
+        try:
+            model = WhisperModel(
+                "large-v3", 
+                device="cuda", 
+                compute_type="float16",
+                cpu_threads=2,
+                num_workers=1
+            )
+        except Exception as e:
+            return {"success": False, "error": f"모델 로딩 실패: {str(e)}"}
+        
+        if progress_callback:
+            progress_callback("🎯 GPU에서 음성 전사 중...")
+        
+        # 전사 실행 - 반복 방지 핵심 설정
+        segments, info = model.transcribe(
+            audio_file_path,
+            beam_size=3,
+            language=None,
+            vad_filter=True,
+            temperature=0.0,
+            initial_prompt=None,
+            word_timestamps=True,
+            condition_on_previous_text=False  # 핵심: 이전 텍스트 참조 비활성화
+        )
+        
+        # 실시간 전사 수집
+        segments_list = []
+        for i, segment in enumerate(segments):
+            segment_text = segment.text.strip()
+            segments_list.append(segment)
+            
+            # 실시간 전사 업데이트
+            if progress_callback:
+                progress_callback(f"💬 [{segment.start:.1f}s] {segment_text}")
+            
+            # 진행 상황 업데이트
+            if i % 5 == 0 and i > 0:
+                if progress_callback:
+                    progress_callback(f"📊 전사 진행: {i+1}개 구간 완료...")
+        
+        print(f"✅ 전사 완료: {len(segments_list)}개 구간, {info.duration:.1f}초")
+        print(f"🔍 감지된 언어: {info.language} (확률: {info.language_probability:.1%})")
+        
+        # 전사 품질 검사
+        if progress_callback:
+            progress_callback("🔍 전사 품질 검사 중...")
+        
+        quality_check = check_transcription_quality(segments_list, progress_callback)
+        if not quality_check["is_valid"]:
+            error_msg = f"전사 품질이 낮습니다: {quality_check['message']}"
+            print(f"❌ {error_msg}")
+            if progress_callback:
+                progress_callback(f"❌ {error_msg}")
+            return {"success": False, "error": error_msg, "quality_issues": quality_check.get("issues", [])}
+        else:
+            print(f"✅ 전사 품질 검사 통과")
+            if progress_callback:
+                progress_callback("✅ 전사 품질 검사 통과")
+        
+        # STT 후처리 - 용어 교정
+        if progress_callback:
+            progress_callback("🔧 STT 후처리 중... (용어 교정 적용)")
+        
+        segments_list = post_process_stt(segments_list)
+        
+        # 화자 분리 적용
+        if progress_callback:
+            progress_callback("🎭 화자 분리 처리 중...")
+        
+        try:
+            from speaker_diarization import perform_speaker_diarization, apply_speaker_diarization_to_transcription, simple_time_based_diarization
+            
+            speaker_segments = perform_speaker_diarization(audio_file_path, num_speakers=None)
+            
+            if speaker_segments:
+                segments_list = apply_speaker_diarization_to_transcription(segments_list, speaker_segments)
+                print("✅ 실제 음성 특성 기반 화자 분리 적용 완료")
+                diarization_success = True
+            else:
+                segments_list = simple_time_based_diarization(segments_list, gap_threshold=5.0, max_speakers=4)
+                print("✅ 시간 기반 화자 구분 적용 완료")
+                diarization_success = True
+                
+        except ImportError:
+            from speaker_diarization import simple_time_based_diarization
+            segments_list = simple_time_based_diarization(segments_list, gap_threshold=5.0, max_speakers=4)
+            print("✅ 시간 기반 화자 구분 적용 완료 (pyannote.audio 미설치)")
+            diarization_success = True
+        except Exception as e:
+            print(f"⚠️ 화자 분리 실패: {e}")
+            for i, segment in enumerate(segments_list):
+                segment.speaker = f"화자{((i//10)%4)+1}"
+            diarization_success = False
+        
+        # 화자 이름 감지 및 적용
+        if progress_callback:
+            progress_callback("🏷️ 화자 이름 자동 감지 중...")
+        
+        try:
+            from speaker_name_detection import process_speaker_names
+            
+            # 세그먼트를 딕셔너리 형태로 변환
+            segment_dicts = []
+            for segment in segments_list:
+                segment_dict = {
+                    'start': segment.start,
+                    'end': segment.end,
+                    'text': segment.text,
+                    'speaker': getattr(segment, 'speaker', 'SPEAKER_00')
+                }
+                segment_dicts.append(segment_dict)
+            
+            # 화자 이름 감지 및 적용
+            updated_segments, speaker_mapping = process_speaker_names(segment_dicts)
+            
+            if speaker_mapping:
+                print(f"🎯 화자 이름 감지 성공: {len(speaker_mapping)}명")
+                for original, name in speaker_mapping.items():
+                    print(f"   {original} → {name}")
+                
+                # 원본 세그먼트에 이름 정보 업데이트
+                for i, updated_segment in enumerate(updated_segments):
+                    if i < len(segments_list):
+                        segments_list[i].speaker = updated_segment['speaker']
+                        if 'original_speaker' in updated_segment:
+                            segments_list[i].original_speaker = updated_segment['original_speaker']
+                
+                if progress_callback:
+                    progress_callback(f"✅ 화자 이름 적용 완료: {', '.join(speaker_mapping.values())}")
+            else:
+                print("ℹ️ 자기소개 패턴을 찾지 못했습니다 (화자1, 화자2 형태로 유지)")
+                if progress_callback:
+                    progress_callback("ℹ️ 화자 이름 감지되지 않음 (화자1, 화자2 형태로 유지)")
+                    
+        except ImportError as e:
+            print(f"⚠️ 화자 이름 감지 모듈 로드 실패: {e}")
+        except Exception as e:
+            print(f"⚠️ 화자 이름 감지 실패: {e}")
+        
+        # 전체 텍스트 생성 (화자 이름 적용 확인)
+        full_text = ""
+        detailed_text = ""
+        
+        for segment in segments_list:
+            # 화자 정보 정확하게 가져오기
+            if hasattr(segment, 'speaker') and segment.speaker:
+                speaker_info = segment.speaker
+            else:
+                speaker_info = "화자1"
+            
+            print(f"📝 세그먼트 저장: {speaker_info} -> {segment.text[:50]}...")  # 디버깅용
+            
+            full_text += f"{speaker_info}: {segment.text.strip()}\n"
+            detailed_text += f"[{segment.start:.1f}s-{segment.end:.1f}s] {speaker_info}: {segment.text.strip()}\n"
+        
+        # AI 분석 실행
+        if progress_callback:
+            progress_callback("🤖 AI가 회의 내용을 분석하여 회의록 생성 중...")
+        
+        ai_analysis = analyze_meeting_with_ai(full_text)
+        ai_analysis_success = ai_analysis is not None
+        
+        # 파일 저장
+        base_name = os.path.splitext(os.path.basename(audio_file_path))[0]
+        timestamp = datetime.now().strftime("%m%d_%H%M")
+        
+        # 전사 결과 파일
+        stt_filename = f"{timestamp}_{base_name}_전사결과.txt"
+        stt_filepath = os.path.join(os.getcwd(), stt_filename)
+        
+        with open(stt_filepath, 'w', encoding='utf-8') as f:
+            f.write(f"{base_name} - STT 전사 결과 (화자 분리 포함)\n")
+            f.write(f"{datetime.now().strftime('%Y.%m.%d %H:%M')} ・ {info.duration:.0f}초\n")
+            f.write(f"언어: {info.language} (확률: {info.language_probability:.1%})\n")
+            f.write(f"화자 분리: {'✅ 성공' if diarization_success else '❌ 기본값 사용'}\n")
+            f.write("="*60 + "\n\n")
+            f.write(detailed_text)
+        
+        # AI 분석 기반 회의록 생성
+        minutes_filename = f"{timestamp}_{base_name}_회의록.txt"
+        minutes_filepath = os.path.join(os.getcwd(), minutes_filename)
+        
+        with open(minutes_filepath, 'w', encoding='utf-8') as f:
+            f.write("# 회의록 (AI 분석)\n\n")
+            f.write(f"## 기본 정보\n")
+            f.write(f"- **일시**: {datetime.now().strftime('%Y년 %m월 %d일 %H시 %M분')}\n")
+            f.write(f"- **파일명**: {os.path.basename(audio_file_path)}\n")
+            f.write(f"- **회의 시간**: {info.duration:.1f}초\n")
+            f.write(f"- **언어**: 한국어 ({info.language_probability:.1%})\n")
+            f.write(f"- **화자 분리**: {'적용됨' if diarization_success else '기본값 사용'}\n")
+            f.write(f"- **AI 분석**: Ollama qwen3:8b\n\n")
+            
+            if ai_analysis:
+                f.write(f"## AI 분석 결과\n\n")
+                f.write(ai_analysis)
+                f.write(f"\n\n")
+            else:
+                f.write(f"## 회의 내용 (AI 분석 실패)\n\n")
+                f.write(f"### 전사 내용\n")
+                f.write(full_text)
+                f.write(f"\n\n")
+            
+            f.write(f"## 상세 전사 내용 (화자별)\n")
+            f.write(f"```\n")
+            f.write(detailed_text)
+            f.write(f"```\n\n")
+            f.write(f"---\n")
+            f.write(f"**이 회의록은 AI 음성인식 및 자동 분석 시스템에 의해 생성되었습니다.**\n")
+        
+        success_msg = f"✅ 고급 처리 완료!"
+        print(success_msg)
+        print(f"   전사 파일: {stt_filename}")
+        print(f"   AI 회의록: {minutes_filename}")
+        print(f"   화자 분리: {'✅' if diarization_success else '❌'}")
+        print(f"   AI 분석: {'✅' if ai_analysis else '❌'}")
+        
+        if progress_callback:
+            progress_callback(success_msg)
+        
+        return {
+            "success": True,
+            "transcription_file": stt_filepath,
+            "minutes_file": minutes_filepath,
+            "transcription_text": detailed_text,
+            "minutes_text": open(minutes_filepath, 'r', encoding='utf-8').read(),
+            "duration": info.duration,
+            "language": info.language,
+            "segment_count": len(segments_list),
+            "diarization_success": diarization_success,
+            "ai_analysis_success": ai_analysis_success
+        }
+        
+    except Exception as e:
+        error_msg = f"❌ STT 처리 오류: {str(e)}"
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 if __name__ == "__main__":
     try:
+        # 시작 시 프로세스 우선순위 제한
+        limit_process_priority()
         complete_transcription_and_minutes()
     except KeyboardInterrupt:
         print("\n❌ 사용자 중단")

@@ -1,21 +1,29 @@
 # Ex-GPT STT: AI-Powered Meeting Minutes Generator
 
-**Ex-GPT STT**는 Faster Whisper와 AI 분석을 결합하여 음성을 텍스트로 변환하고 구조화된 회의록을 자동으로 생성하는 프로젝트입니다.
+**Ex-GPT STT**는 Faster Whisper와 AI 분석을 결합하여 음성을 텍스트로 변환하고 구조화된 회의록을 자동으로 생성하며, 이메일로 송부까지 자동화하는 종합 솔루션입니다.
 
 ## 🌟 주요 기능
 
+### 🎯 핵심 기능
 - **고성능 STT (Speech-to-Text)**: Faster Whisper 기반 음성 인식
 - **한국어 후처리**: 전문 용어 및 고유명사 보정
-- **AI 회의록 생성**: Qwen3-8B 모델을 활용한 구조화된 회의록 자동 생성
-- **PDF 템플릿 호환**: 기존 회의록 템플릿 형식 유지
-- **드래그 앤 드롭 지원**: 간편한 오디오 파일 처리
+- **AI 회의록 생성**: Ollama Qwen3-8B 모델을 활용한 구조화된 회의록 자동 생성
+- **이메일 자동 발송**: 생성된 회의록을 참석자에게 자동 이메일 발송
+- **API 서버**: RESTful API를 통한 모바일/웹 연동 지원
+
+### 🚀 사용자 인터페이스
+- **GUI 애플리케이션**: 드래그 앤 드롭 지원 데스크톱 앱
+- **웹 대시보드**: 관리자용 모니터링 대시보드
+- **API 엔드포인트**: 외부 시스템과의 연동
 
 ## 📋 프로젝트 구성
 
 ### 핵심 파일
-- **`app.py`**: 통합 STT 및 회의록 생성 애플리케이션
-- **`stt.py`**: 고급 STT 처리 및 후처리 기능
-- **`stt_simple.py`**: 간단한 STT 변환 도구
+- **`app.py`**: GUI 기반 통합 STT 및 회의록 생성 애플리케이션
+- **`api_server.py`**: FastAPI 기반 REST API 서버
+- **`stt_simple.py`**: 명령행 기반 간단한 STT 변환 도구
+- **`email_utils.py`**: 이메일 발송 및 주소 관리 유틸리티
+- **`speaker_diarization.py`**: 화자 분리 처리 모듈
 
 ### 처리 흐름
 1. **음성 인식**: Faster Whisper를 사용한 고정밀도 STT
@@ -63,22 +71,30 @@ ollama pull qwen3:8b
 
 ### 사용법
 
-#### 통합 애플리케이션 실행
+#### 1. GUI 애플리케이션 (권장)
 ```bash
 uv run python app.py
 ```
 - 드래그 앤 드롭으로 오디오 파일 추가
-- 자동 STT 처리 및 회의록 생성
+- 자동 STT 처리, 회의록 생성, 이메일 발송
 
-#### 명령줄 STT 처리
+#### 2. API 서버 실행
 ```bash
-uv run python stt.py audio_file.mp3
+# API 서버 시작
+uv run python api_server.py
+
+# 또는 스크립트 사용
+./start_api_server.sh
 ```
 
-#### 간단한 STT 변환
+#### 3. 명령행 STT 변환
 ```bash
 uv run python stt_simple.py audio_file.wav
 ```
+
+#### 4. 웹 대시보드 접속
+- API 서버 실행 후 `http://localhost:8081/dashboard` 접속
+- 업로드 및 처리 현황 모니터링
 
 ## 🔧 고급 기능
 
@@ -148,43 +164,61 @@ def generate_meeting_minutes(transcription_text):
     return response.json()["response"]
 ```
 
-**방법 2: vLLM 사용 (더 빠른 처리, 선택사항)**
+### 이메일 자동 발송 설정
 
-⚠️ **주의**: vLLM은 PyTorch 버전 충돌로 인해 현재 uv 환경에서 직접 설치할 수 없습니다.
+이메일 기능을 위한 환경 설정:
 
-**대안 1: 별도 conda 환경 사용**
+#### 1. Gmail SMTP 설정 (권장)
 ```bash
-# 새로운 conda 환경 생성
-conda create -n vllm-env python=3.10
-conda activate vllm-env
+# 이메일 환경 설정
+uv run python setup_email_env.py
 
-# vLLM 설치
-pip install vllm
-
-# vLLM 서버 실행  
-vllm serve Qwen/Qwen3-8B --host 0.0.0.0 --port 8000
-
-# 메인 터미널에서 (uv 환경)
-uv run python app.py  # 자동으로 vLLM 감지 및 사용
+# Gmail 앱 비밀번호 설정
+uv run python setup_gmail_smtp.py
 ```
 
-**대안 2: Docker 사용**
+#### 2. 환경 변수 설정 (.env 파일)
 ```bash
-# vLLM Docker 실행
-docker run --gpus all \
-    -p 8000:8000 \
-    vllm/vllm-openai:latest \
-    --model Qwen/Qwen3-8B \
-    --host 0.0.0.0 --port 8000
+# Gmail 설정
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+EMAIL_ADDRESS=your_email@gmail.com
+EMAIL_PASSWORD=your_app_password
 
-# 애플리케이션 실행
-uv run python app.py
+# 회의록 참석자 이메일 매핑
+SENDER_EMAIL_MAPPING={"김철수": "kim@company.com", "이영희": "lee@company.com"}
 ```
 
-**대안 3: Ollama만 사용 (현재 권장)**
+### API 서버 기능
+
+#### 주요 엔드포인트
 ```bash
-# 타임아웃 증가로 안정성 확보 (5분)
-uv run python app.py
+POST /upload-audio          # 오디오 파일 업로드 및 처리
+GET  /processing-status/{id} # 처리 상태 확인  
+GET  /download/{filename}    # 결과 파일 다운로드
+POST /send-email            # 이메일 발송
+GET  /dashboard             # 웹 대시보드 접속
+```
+
+#### API 사용 예시
+```python
+import requests
+import json
+
+# 오디오 파일 업로드
+with open("meeting.mp3", "rb") as f:
+    response = requests.post(
+        "http://localhost:8081/upload-audio",
+        files={"file": f},
+        data={
+            "meeting_title": "프로젝트 회의",
+            "sender_email": "admin@company.com",
+            "auto_send_email": "true"
+        }
+    )
+
+result = response.json()
+print(f"처리 ID: {result['processing_id']}")
 ```
 
 ## 🛠 개발 및 테스트
@@ -200,8 +234,6 @@ uv sync --extra gpu
 # 실제 화자 분리 기능 (pyannote.audio)
 uv sync --extra diarization
 
-# 벤치마크 도구
-uv sync --extra benchmark
 ```
 
 ### 테스트 실행

@@ -19,8 +19,8 @@ class TestMeetingMinutesGeneration:
         """
     
     @pytest.fixture 
-    def mock_ollama_response(self):
-        """모킹된 Ollama API 응답"""
+    def mock_vllm_response(self):
+        """모킹된 vLLM API 응답"""
         return {
             "response": """
             1. 회의 주제: 프로젝트 진행 상황 검토
@@ -36,11 +36,11 @@ class TestMeetingMinutesGeneration:
             """
         }
     
-    def test_ai_response_parsing(self, mock_ollama_response):
+    def test_ai_response_parsing(self, mock_vllm_response):
         """AI 응답 파싱 테스트"""
         from stt_simple import parse_ai_response
         
-        ai_response = mock_ollama_response["response"]
+        ai_response = mock_vllm_response["response"]
         analysis = parse_ai_response(ai_response)
         
         assert analysis["topic"] == "프로젝트 진행 상황 검토"
@@ -50,8 +50,8 @@ class TestMeetingMinutesGeneration:
         assert "API 연동 지연 발생" in analysis["issues"]
     
     @patch('requests.post')
-    def test_ollama_api_call(self, mock_post, sample_transcription):
-        """Ollama API 호출 테스트"""
+    def test_vllm_api_call(self, mock_post, sample_transcription):
+        """vLLM API 호출 테스트"""
         from stt_simple import analyze_with_ai
         
         # 모킹된 응답 설정
@@ -69,15 +69,14 @@ class TestMeetingMinutesGeneration:
         mock_post.assert_called_once()
         call_args = mock_post.call_args
         
-        assert call_args[0][0] == "http://localhost:11434/api/generate"
-        assert "model" in call_args[1]["json"]
-        assert call_args[1]["json"]["model"] == "qwen3:32b"
-        assert "prompt" in call_args[1]["json"]
-        assert sample_transcription in call_args[1]["json"]["prompt"]
+        assert call_args[0][0] == "http://localhost:8000/v1/chat/completions"
+        assert "messages" in call_args[1]["json"]
+        assert len(call_args[1]["json"]["messages"]) > 0
+        assert sample_transcription in call_args[1]["json"]["messages"][0]["content"]
     
     @patch('requests.post')
-    def test_ollama_api_failure(self, mock_post, sample_transcription):
-        """Ollama API 실패 처리 테스트"""
+    def test_vllm_api_failure(self, mock_post, sample_transcription):
+        """vLLM API 실패 처리 테스트"""
         from stt_simple import analyze_with_ai, create_simple_analysis
         
         # API 실패 시뮬레이션
